@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"math/big"
 	"net/http"
 	"os"
@@ -49,14 +48,13 @@ type NetworkConfig struct {
 }
 
 var networkConfigs = map[string]NetworkConfig{
-	"sepolia":          {big.NewInt(1), sepoliaRpcUrl},
-	"optimism_sepolia": {big.NewInt(10), optimismSepoliaRpcUrl},
+	"sepolia":          {big.NewInt(11155111), sepoliaRpcUrl},
+	"optimism_sepolia": {big.NewInt(11155420), optimismSepoliaRpcUrl},
 }
 
 type SaveFileNetwork struct {
 	ProjectId       string   `json:"projectId"`
 	SuckerAddresses []string `json:"suckerAddress"`
-	ProjectOwner    string   `json:"projectOwner"`
 }
 
 func main() {
@@ -78,15 +76,18 @@ func main() {
 	if _, err := os.Stat(*savePath); err == nil {
 		saveFile, err := os.Open(*savePath)
 		if err != nil {
-			log.Fatalf("Error opening save file '%s': %s\n", *savePath, err)
+			fmt.Fprintf(os.Stderr, "Error opening save file '%s': %s\n", *savePath, err)
+			return
 		}
 		decoder := json.NewDecoder(saveFile)
 		if err := decoder.Decode(&save.Data); err != nil {
-			log.Fatalf("Error decoding save file '%s': %s\n", *savePath, err)
+			fmt.Fprintf(os.Stderr, "Error decoding save file '%s': %s\n", *savePath, err)
+			return
 		}
 		saveFile.Close()
 	} else if !os.IsNotExist(err) {
-		log.Fatalf("Error checking save file '%s': %s\n", *savePath, err)
+		fmt.Fprintf(os.Stderr, "Error checking save file '%s': %s\n", *savePath, err)
+		return
 	}
 
 	// Write updated data to the save file on exit
@@ -94,12 +95,13 @@ func main() {
 		if !*noSave {
 			saveFile, err := os.Create(*savePath) // Overwrite
 			if err != nil {
-				log.Fatalf("Error creating save file at %s: %s\n", *savePath, err)
+				fmt.Fprintf(os.Stderr, "Error creating save file at %s: %s\n", *savePath, err)
+				return
 			}
 			defer saveFile.Close()
 
 			if err := json.NewEncoder(saveFile).Encode(save.Data); err != nil {
-				log.Fatalf("Error writing to save file at %s: %s\n", *savePath, err)
+				fmt.Fprintf(os.Stderr, "Error writing to save file at %s: %s\n", *savePath, err)
 			}
 		}
 	}()
@@ -107,10 +109,12 @@ func main() {
 	// Set up the wallet from the keystore
 	if _, err := os.Stat(*keystoreDir); os.IsNotExist(err) {
 		if err := os.Mkdir(*keystoreDir, 0o700); err != nil {
-			log.Fatalf("Error creating keystore directory: %s\n", err)
+			fmt.Fprintf(os.Stderr, "Error creating keystore directory: %s\n", err)
+			return
 		}
 	} else if err != nil {
-		log.Fatalf("Error checking keystore directory: %s\n", err)
+		fmt.Fprintf(os.Stderr, "Error checking keystore directory: %s\n", err)
+		return
 	}
 	ks := keystore.NewKeyStore(*keystoreDir, keystore.StandardScryptN, keystore.StandardScryptP)
 
@@ -118,16 +122,19 @@ func main() {
 		fmt.Println("No accounts found in keystore. Creating one...")
 		keystoreAccount, err := ks.NewAccount(*keystorePassword)
 		if err != nil {
-			log.Fatalf("Error creating keystore account: %s\n", err)
+			fmt.Fprintf(os.Stderr, "Error creating keystore account: %s\n", err)
+			return
 		}
-		fmt.Printf("Created keystore account: %s\nFund this wallet and re-run without -init", keystoreAccount.Address.Hex())
+		fmt.Printf("Created keystore account: %s\nFund the wallet and re-run this program.\n", keystoreAccount.Address.Hex())
 		os.Exit(0)
 	} else {
 		if *keystoreIndex >= len(ks.Accounts()) {
-			log.Fatalf("Keystore index %d is out of range. Keystore %s only has %d accounts.\n", *keystoreIndex, *keystoreDir, len(ks.Accounts()))
+			fmt.Fprintf(os.Stderr, "Keystore index %d is out of range. Keystore %s only has %d accounts.\n", *keystoreIndex, *keystoreDir, len(ks.Accounts()))
+			return
 		}
 		if err := ks.Unlock(ks.Accounts()[*keystoreIndex], *keystorePassword); err != nil {
-			log.Fatalf("Error unlocking keystore: %s\n", err)
+			fmt.Fprintf(os.Stderr, "Error unlocking keystore: %s\n", err)
+			return
 		}
 		defer ks.Lock(ks.Accounts()[*keystoreIndex].Address)
 		fmt.Printf("Found keystore account: %s\n", ks.Accounts()[0].Address.Hex())
@@ -138,18 +145,23 @@ func main() {
 	// Set up the clients and contracts on each network
 	sepolia, err := setupNetwork("sepolia", ks, ks.Accounts()[*keystoreIndex])
 	if err != nil {
-		log.Fatalf("Setup error on Sepolia: %s\n", err)
+		fmt.Fprintf(os.Stderr, "Setup error on Sepolia: %s\n", err)
+		return
 	}
 
 	optimismSepolia, err := setupNetwork("optimism_sepolia", ks, ks.Accounts()[*keystoreIndex])
 	if err != nil {
-		log.Fatalf("Setup error on Optimism Sepolia: %s\n", err)
+		fmt.Fprintf(os.Stderr, "Setup error on Optimism Sepolia: %s\n", err)
+		return
 	}
 
 	// Launch projects and suckers on each chain.
+	networks := []SetupNetwork{sepolia, optimismSepolia}
 	var wg sync.WaitGroup
+	errsCh := make(chan error, len(networks))
+
 	ctx, cancel := context.WithCancel(context.Background())
-	for _, network := range []SetupNetwork{sepolia, optimismSepolia} {
+	for _, network := range networks {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -171,7 +183,7 @@ func main() {
 
 			// Launch a project if we don't have one
 			if networkSave.ProjectId == "" {
-				log.Printf("Launching a new project on %s\n", network.name)
+				fmt.Printf("Launching a new project on %s\n", network.name)
 
 				// TODO: Tx logic is duplicative. Could this be refactored?
 				tx, err := network.controller.LaunchProjectFor(
@@ -185,14 +197,16 @@ func main() {
 
 				if err != nil {
 					cancel()
-					log.Fatalf("Error launching project on %s: %s\n", network.client, err)
+					errsCh <- fmt.Errorf("Error launching project on %s: %s\n", network.name, err)
+					return
 				}
 
-				log.Printf("Launching project on %s in tx %s ...\n", network.name, tx.Hash().Hex())
+				fmt.Printf("Launching project on %s in tx %s ...\n", network.name, tx.Hash().Hex())
 				receipt, err := bind.WaitMined(ctx, network.client, tx)
 				if err != nil {
 					cancel()
-					log.Fatalf("Error waiting for project launch on %s: %s\n", network.name, err)
+					errsCh <- fmt.Errorf("Error waiting for project launch on %s: %s\n", network.name, err)
+					return
 				}
 
 				foundLaunchLog := false
@@ -203,22 +217,26 @@ func main() {
 					}
 					foundLaunchLog = true
 					networkSave.ProjectId = launchLog.ProjectId.String() // Add to save data
-					log.Printf("Launched project #%s on %s\n", launchLog.ProjectId, network.name)
+					fmt.Printf("Launched project #%s on %s\n", launchLog.ProjectId, network.name)
 					break
 				}
 
 				if !foundLaunchLog {
-					log.Fatalf("Could not find a LaunchProject event for transaction %s on %s", tx.Hash().Hex(), network.name)
+					cancel()
+					errsCh <- fmt.Errorf("Could not find a LaunchProject event for transaction %s on %s", tx.Hash().Hex(), network.name)
+					return
 				}
 			}
 
 			projectId, success := new(big.Int).SetString(networkSave.ProjectId, 10)
 			if !success {
-				log.Fatalf("Error parsing project ID from save file: '%s'\n", networkSave.ProjectId)
+				cancel()
+				errsCh <- fmt.Errorf("Error parsing project ID from save file: '%s'\n", networkSave.ProjectId)
+				return
 			}
 
 			// We know there's no sucker (we checked above)
-			log.Printf("Launching a sucker for project %s on %s\n", networkSave.ProjectId, network.name)
+			fmt.Printf("Launching a sucker for project %s on %s\n", networkSave.ProjectId, network.name)
 			tx, err := network.registry.DeploySuckersFor(
 				network.transactor,
 				projectId,
@@ -227,14 +245,16 @@ func main() {
 			)
 			if err != nil {
 				cancel()
-				log.Fatalf("Error deploying sucker for project %s on %s: %s\n", networkSave.ProjectId, network.name, err)
+				errsCh <- fmt.Errorf("Error deploying sucker for project %s on %s: %s\n", networkSave.ProjectId, network.name, err)
+				return
 			}
 
-			log.Printf("Deploying sucker for project %s on %s in tx %s ...\n", networkSave.ProjectId, network.name, tx.Hash().Hex())
+			fmt.Printf("Deploying sucker for project %s on %s in tx %s ...\n", networkSave.ProjectId, network.name, tx.Hash().Hex())
 			receipt, err := bind.WaitMined(ctx, network.client, tx)
 			if err != nil {
 				cancel()
-				log.Fatalf("Error waiting for sucker deployment for project %s on %s: %s\n", networkSave.ProjectId, network.name, err)
+				errsCh <- fmt.Errorf("Error waiting for sucker deployment for project %s on %s: %s\n", networkSave.ProjectId, network.name, err)
+				return
 			}
 
 			foundDeployLog := false
@@ -251,17 +271,26 @@ func main() {
 					suckerStrs[i] = sucker.String()
 				}
 				networkSave.SuckerAddresses = suckerStrs
-				log.Printf("Launched suckers for project #%s on %s: %v\n", projectId, network.name, suckerStrs)
+				fmt.Printf("Launched suckers for project #%s on %s: %v\n", projectId, network.name, suckerStrs)
 				break
 			}
 
 			if !foundDeployLog {
-				log.Fatalf("Could not find a SuckersDeployed event for transaction %s on %s", tx.Hash().Hex(), network.name)
+				cancel()
+				errsCh <- fmt.Errorf("Could not find a SuckersDeployed event for transaction %s on %s", tx.Hash().Hex(), network.name)
+				return
 			}
 		}()
 	}
 
 	wg.Wait()
+	close(errsCh)
+	for err := range errsCh {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+	}
 
 }
 
@@ -320,7 +349,7 @@ func setupNetwork(networkConfig string, ks *keystore.KeyStore, act accounts.Acco
 func deployedTo(jsonUrl string) (common.Address, error) {
 	resp, err := http.Get(jsonUrl)
 	if err != nil {
-		log.Fatalf("Error fetching %s: %s\n", jsonUrl, err)
+		return common.Address{}, fmt.Errorf("Error fetching %s: %s\n", jsonUrl, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
