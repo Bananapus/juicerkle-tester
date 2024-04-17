@@ -11,8 +11,10 @@ import (
 	"os"
 	"sync"
 
+	suck "github.com/Bananapus/juicerkle-tester/bindings/BPSucker"
 	reg "github.com/Bananapus/juicerkle-tester/bindings/BPSuckerRegistry"
 	con "github.com/Bananapus/juicerkle-tester/bindings/JBController"
+	term "github.com/Bananapus/juicerkle-tester/bindings/JBMultiTerminal"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -40,6 +42,10 @@ const (
 	coreDeployUrl         = "https://raw.githubusercontent.com/Bananapus/nana-core/main/deployments/nana-core/"
 	sepoliaRpcUrl         = "https://rpc.ankr.com/eth_sepolia"
 	optimismSepoliaRpcUrl = "https://rpc.ankr.com/optimism_sepolia"
+)
+
+var (
+	nativeTokenAddress = common.HexToAddress("0x000000000000000000000000000000000000EEEe")
 )
 
 type NetworkConfig struct {
@@ -190,9 +196,12 @@ func main() {
 					network.transactor,
 					userAddr,
 					"",
-					[]con.JBRulesetConfig{},
-					[]con.JBTerminalConfig{},
-					"Excellent success.",
+					[]con.JBRulesetConfig{{Weight: big.NewInt(1e18)}}, // Everything else is zero-valued
+					[]con.JBTerminalConfig{{
+						Terminal:       network.terminalAddress,
+						TokensToAccept: []common.Address{nativeTokenAddress},
+					}},
+					"Launched with juicerkle-tester.",
 				)
 
 				if err != nil {
@@ -201,7 +210,7 @@ func main() {
 					return
 				}
 
-				fmt.Printf("Launching project on %s in tx %s ...\n", network.name, tx.Hash().Hex())
+				fmt.Printf("Launching project on %s in tx %s ...\n", network.name, tx.Hash())
 				receipt, err := bind.WaitMined(ctx, network.client, tx)
 				if err != nil {
 					cancel()
@@ -220,10 +229,9 @@ func main() {
 					fmt.Printf("Launched project #%s on %s\n", launchLog.ProjectId, network.name)
 					break
 				}
-
 				if !foundLaunchLog {
 					cancel()
-					errsCh <- fmt.Errorf("Could not find a LaunchProject event for transaction %s on %s", tx.Hash().Hex(), network.name)
+					errsCh <- fmt.Errorf("Could not find a LaunchProject event for transaction %s on %s", tx.Hash(), network.name)
 					return
 				}
 			}
@@ -241,7 +249,13 @@ func main() {
 				network.transactor,
 				projectId,
 				[32]byte{},
-				[]reg.BPSuckerDeployerConfig{},
+				[]reg.BPSuckerDeployerConfig{{
+					Deployer: network.suckerDeployer,
+					Mappings: []reg.BPTokenMapping{{
+						LocalToken:  nativeTokenAddress,
+						RemoteToken: nativeTokenAddress,
+					}},
+				}},
 			)
 			if err != nil {
 				cancel()
@@ -249,7 +263,7 @@ func main() {
 				return
 			}
 
-			fmt.Printf("Deploying sucker for project %s on %s in tx %s ...\n", networkSave.ProjectId, network.name, tx.Hash().Hex())
+			fmt.Printf("Deploying sucker for project %s on %s in tx %s ...\n", networkSave.ProjectId, network.name, tx.Hash())
 			receipt, err := bind.WaitMined(ctx, network.client, tx)
 			if err != nil {
 				cancel()
@@ -265,6 +279,12 @@ func main() {
 				}
 				foundDeployLog = true
 
+        if len(deployLog.Suckers) == 0 {
+          cancel()
+          errsCh <- fmt.Errorf("No suckers deployed for project #%s on %s", projectId, network.name)
+          return
+        }
+
 				// Convert sucker addresses to strings and add to save data.
 				suckerStrs := make([]string, len(deployLog.Suckers))
 				for i, sucker := range deployLog.Suckers {
@@ -272,14 +292,101 @@ func main() {
 				}
 				networkSave.SuckerAddresses = suckerStrs
 				fmt.Printf("Launched suckers for project #%s on %s: %v\n", projectId, network.name, suckerStrs)
+
+        // Set up sucker binding
+        sucker, err := suck.NewBPSucker(deployLog.Suckers[0], network.client)
+        if err != nil {
+          cancel()
+          errsCh <- fmt.Errorf("Error initializing sucker on %s: %s\n", network.name, err)
+          return
+        }
+        network.sucker = sucker
+
 				break
 			}
 
 			if !foundDeployLog {
 				cancel()
-				errsCh <- fmt.Errorf("Could not find a SuckersDeployed event for transaction %s on %s", tx.Hash().Hex(), network.name)
+				errsCh <- fmt.Errorf("Could not find a SuckersDeployed event for transaction %s on %s", tx.Hash(), network.name)
 				return
 			}
+
+		}()
+	}
+
+	wg.Wait()
+	close(errsCh)
+	for err := range errsCh {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+	}
+
+	// Part 2: Pay the project on both chains and attend to bridge with the suckers.
+	errsCh = make(chan error, len(networks))
+	for _, network := range networks {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			save.RLock()
+			networkSave, _ := save.Data[network.name]
+			save.RUnlock()
+
+      // Make sure we have a sucker
+      if network.sucker == nil {
+        cancel()
+        errsCh <- fmt.Errorf("No sucker saved for project #%s on %s", networkSave.ProjectId, network.name)
+        return
+      }
+
+			projectId, success := new(big.Int).SetString(networkSave.ProjectId, 10)
+			if !success {
+				cancel()
+				errsCh <- fmt.Errorf("Error parsing project ID from save file: '%s'\n", networkSave.ProjectId)
+				return
+			}
+
+			// Pay the project
+			tx, err := network.terminal.Pay(
+				network.transactor,
+				projectId,
+				nativeTokenAddress,
+				big.NewInt(100), // 100 wei
+				userAddr,
+				big.NewInt(0),
+				"Paid from juicerkle-tester",
+				[]byte{},
+			)
+			if err != nil {
+				cancel()
+				fmt.Fprintf(os.Stderr, "Error paying project %s on %s: %s\n", networkSave.ProjectId, network.name, err)
+				return
+			}
+
+			receipt, err := bind.WaitMined(ctx, network.client, tx)
+			if err != nil {
+				cancel()
+				fmt.Fprintf(os.Stderr, "Error waiting for project payment on %s: %s\n", network.name, err)
+				return
+			}
+
+			foundPayLog := false
+			for _, vLog := range receipt.Logs {
+				payLog, err := network.terminal.ParsePay(*vLog)
+				if err != nil {
+					continue
+				}
+				foundPayLog = true
+				fmt.Printf("Successfully paid project %s in transaction %s on %s.\n", payLog.ProjectId, tx.Hash(), network.name)
+				break
+			}
+			if !foundPayLog {
+				cancel()
+				errsCh <- fmt.Errorf("Could not find a Pay event for transaction %s on %s", tx.Hash(), network.name)
+				return
+			}
+
 		}()
 	}
 
@@ -295,11 +402,15 @@ func main() {
 }
 
 type SetupNetwork struct {
-	name       string
-	client     *ethclient.Client
-	transactor *bind.TransactOpts
-	registry   *reg.BPSuckerRegistry
-	controller *con.JBController
+	name            string
+	client          *ethclient.Client
+	transactor      *bind.TransactOpts
+	sucker          *suck.BPSucker
+	registry        *reg.BPSuckerRegistry
+	controller      *con.JBController
+	terminal        *term.JBMultiTerminal
+	terminalAddress common.Address
+	suckerDeployer  common.Address
 }
 
 func setupNetwork(networkConfig string, ks *keystore.KeyStore, act accounts.Account) (SetupNetwork, error) {
@@ -331,6 +442,23 @@ func setupNetwork(networkConfig string, ks *keystore.KeyStore, act accounts.Acco
 		return SetupNetwork{}, fmt.Errorf("Error initializing JBController on %s: %s\n", networkConfig, err)
 	}
 
+	// Get the multi terminal on that chain
+	multiTerminalUrl := coreDeployUrl + networkConfig + "/JBMultiTerminal.json"
+	terminalAddress, err := deployedTo(multiTerminalUrl)
+	if err != nil {
+		return SetupNetwork{}, fmt.Errorf("Error getting JBMultiTerminal address on %s: %s\n", networkConfig, err)
+	}
+	terminal, err := term.NewJBMultiTerminal(terminalAddress, client)
+	if err != nil {
+		return SetupNetwork{}, fmt.Errorf("Error initializing JBMultiTerminal on %s: %s\n", networkConfig, err)
+	}
+
+	suckerDeployerUrl := coreDeployUrl + networkConfig + "/BPOptimismSuckerDeployer.json"
+	suckerDeployerAddress, err := deployedTo(suckerDeployerUrl)
+	if err != nil {
+		return SetupNetwork{}, fmt.Errorf("Error getting BPOptimismSuckerDeployer address on %s: %s\n", networkConfig, err)
+	}
+
 	// Get the sucker registry on that chain
 	registryUrl := suckerDeployUrl + networkConfig + "/BPSuckerRegistry.json"
 	registryAddress, err := deployedTo(registryUrl)
@@ -343,7 +471,7 @@ func setupNetwork(networkConfig string, ks *keystore.KeyStore, act accounts.Acco
 	}
 
 	name := networkConfig
-	return SetupNetwork{name, client, auth, registry, controller}, nil
+	return SetupNetwork{name, client, auth, nil, registry, controller, terminal, terminalAddress, suckerDeployerAddress}, nil
 }
 
 func deployedTo(jsonUrl string) (common.Address, error) {
