@@ -325,6 +325,25 @@
     "anonymous": false
   },
   {
+    "type": "event",
+    "name": "SuckersDeployedFor",
+    "inputs": [
+      {
+        "name": "projectId",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "suckers",
+        "type": "address[]",
+        "indexed": false,
+        "internalType": "address[]"
+      }
+    ],
+    "anonymous": false
+  },
+  {
     "type": "error",
     "name": "EnumerableMapNonexistentKey",
     "inputs": [

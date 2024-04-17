@@ -45,7 +45,7 @@ type BPTokenMapping struct {
 
 // BPSuckerRegistryMetaData contains all meta data concerning the BPSuckerRegistry contract.
 var BPSuckerRegistryMetaData = &bind.MetaData{
-	ABI: "[{\"type\":\"constructor\",\"inputs\":[{\"name\":\"projects\",\"type\":\"address\",\"internalType\":\"contractIJBProjects\"},{\"name\":\"permissions\",\"type\":\"address\",\"internalType\":\"contractIJBPermissions\"},{\"name\":\"_initialOwner\",\"type\":\"address\",\"internalType\":\"address\"}],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"PERMISSIONS\",\"inputs\":[],\"outputs\":[{\"name\":\"\",\"type\":\"address\",\"internalType\":\"contractIJBPermissions\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"PROJECTS\",\"inputs\":[],\"outputs\":[{\"name\":\"\",\"type\":\"address\",\"internalType\":\"contractIJBProjects\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"allowSuckerDeployer\",\"inputs\":[{\"name\":\"deployer\",\"type\":\"address\",\"internalType\":\"address\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"allowSuckerDeployers\",\"inputs\":[{\"name\":\"deployers\",\"type\":\"address[]\",\"internalType\":\"address[]\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"deploySuckersFor\",\"inputs\":[{\"name\":\"projectId\",\"type\":\"uint256\",\"internalType\":\"uint256\"},{\"name\":\"salt\",\"type\":\"bytes32\",\"internalType\":\"bytes32\"},{\"name\":\"configurations\",\"type\":\"tuple[]\",\"internalType\":\"structBPSuckerDeployerConfig[]\",\"components\":[{\"name\":\"deployer\",\"type\":\"address\",\"internalType\":\"contractIBPSuckerDeployer\"},{\"name\":\"mappings\",\"type\":\"tuple[]\",\"internalType\":\"structBPTokenMapping[]\",\"components\":[{\"name\":\"localToken\",\"type\":\"address\",\"internalType\":\"address\"},{\"name\":\"minGas\",\"type\":\"uint32\",\"internalType\":\"uint32\"},{\"name\":\"remoteToken\",\"type\":\"address\",\"internalType\":\"address\"},{\"name\":\"minBridgeAmount\",\"type\":\"uint256\",\"internalType\":\"uint256\"}]}]}],\"outputs\":[{\"name\":\"suckers\",\"type\":\"address[]\",\"internalType\":\"address[]\"}],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"isSuckerOf\",\"inputs\":[{\"name\":\"projectId\",\"type\":\"uint256\",\"internalType\":\"uint256\"},{\"name\":\"suckerAddress\",\"type\":\"address\",\"internalType\":\"address\"}],\"outputs\":[{\"name\":\"\",\"type\":\"bool\",\"internalType\":\"bool\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"jbOwner\",\"inputs\":[],\"outputs\":[{\"name\":\"owner\",\"type\":\"address\",\"internalType\":\"address\"},{\"name\":\"projectId\",\"type\":\"uint88\",\"internalType\":\"uint88\"},{\"name\":\"permissionId\",\"type\":\"uint8\",\"internalType\":\"uint8\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"owner\",\"inputs\":[],\"outputs\":[{\"name\":\"\",\"type\":\"address\",\"internalType\":\"address\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"renounceOwnership\",\"inputs\":[],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"setPermissionId\",\"inputs\":[{\"name\":\"permissionId\",\"type\":\"uint8\",\"internalType\":\"uint8\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"suckerDeployerIsAllowed\",\"inputs\":[{\"name\":\"deployer\",\"type\":\"address\",\"internalType\":\"address\"}],\"outputs\":[{\"name\":\"\",\"type\":\"bool\",\"internalType\":\"bool\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"suckersOf\",\"inputs\":[{\"name\":\"projectId\",\"type\":\"uint256\",\"internalType\":\"uint256\"}],\"outputs\":[{\"name\":\"\",\"type\":\"address[]\",\"internalType\":\"address[]\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"transferOwnership\",\"inputs\":[{\"name\":\"newOwner\",\"type\":\"address\",\"internalType\":\"address\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"transferOwnershipToProject\",\"inputs\":[{\"name\":\"projectId\",\"type\":\"uint256\",\"internalType\":\"uint256\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"event\",\"name\":\"OwnershipTransferred\",\"inputs\":[{\"name\":\"previousOwner\",\"type\":\"address\",\"indexed\":true,\"internalType\":\"address\"},{\"name\":\"newOwner\",\"type\":\"address\",\"indexed\":true,\"internalType\":\"address\"}],\"anonymous\":false},{\"type\":\"event\",\"name\":\"PermissionIdChanged\",\"inputs\":[{\"name\":\"newIndex\",\"type\":\"uint8\",\"indexed\":false,\"internalType\":\"uint8\"}],\"anonymous\":false},{\"type\":\"event\",\"name\":\"SuckerDeployerAllowed\",\"inputs\":[{\"name\":\"deployer\",\"type\":\"address\",\"indexed\":false,\"internalType\":\"address\"}],\"anonymous\":false},{\"type\":\"error\",\"name\":\"EnumerableMapNonexistentKey\",\"inputs\":[{\"name\":\"key\",\"type\":\"bytes32\",\"internalType\":\"bytes32\"}]},{\"type\":\"error\",\"name\":\"INVALID_DEPLOYER\",\"inputs\":[{\"name\":\"deployer\",\"type\":\"address\",\"internalType\":\"address\"}]},{\"type\":\"error\",\"name\":\"INVALID_NEW_OWNER\",\"inputs\":[]},{\"type\":\"error\",\"name\":\"UNAUTHORIZED\",\"inputs\":[]}]",
+	ABI: "[{\"type\":\"constructor\",\"inputs\":[{\"name\":\"projects\",\"type\":\"address\",\"internalType\":\"contractIJBProjects\"},{\"name\":\"permissions\",\"type\":\"address\",\"internalType\":\"contractIJBPermissions\"},{\"name\":\"_initialOwner\",\"type\":\"address\",\"internalType\":\"address\"}],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"PERMISSIONS\",\"inputs\":[],\"outputs\":[{\"name\":\"\",\"type\":\"address\",\"internalType\":\"contractIJBPermissions\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"PROJECTS\",\"inputs\":[],\"outputs\":[{\"name\":\"\",\"type\":\"address\",\"internalType\":\"contractIJBProjects\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"allowSuckerDeployer\",\"inputs\":[{\"name\":\"deployer\",\"type\":\"address\",\"internalType\":\"address\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"allowSuckerDeployers\",\"inputs\":[{\"name\":\"deployers\",\"type\":\"address[]\",\"internalType\":\"address[]\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"deploySuckersFor\",\"inputs\":[{\"name\":\"projectId\",\"type\":\"uint256\",\"internalType\":\"uint256\"},{\"name\":\"salt\",\"type\":\"bytes32\",\"internalType\":\"bytes32\"},{\"name\":\"configurations\",\"type\":\"tuple[]\",\"internalType\":\"structBPSuckerDeployerConfig[]\",\"components\":[{\"name\":\"deployer\",\"type\":\"address\",\"internalType\":\"contractIBPSuckerDeployer\"},{\"name\":\"mappings\",\"type\":\"tuple[]\",\"internalType\":\"structBPTokenMapping[]\",\"components\":[{\"name\":\"localToken\",\"type\":\"address\",\"internalType\":\"address\"},{\"name\":\"minGas\",\"type\":\"uint32\",\"internalType\":\"uint32\"},{\"name\":\"remoteToken\",\"type\":\"address\",\"internalType\":\"address\"},{\"name\":\"minBridgeAmount\",\"type\":\"uint256\",\"internalType\":\"uint256\"}]}]}],\"outputs\":[{\"name\":\"suckers\",\"type\":\"address[]\",\"internalType\":\"address[]\"}],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"isSuckerOf\",\"inputs\":[{\"name\":\"projectId\",\"type\":\"uint256\",\"internalType\":\"uint256\"},{\"name\":\"suckerAddress\",\"type\":\"address\",\"internalType\":\"address\"}],\"outputs\":[{\"name\":\"\",\"type\":\"bool\",\"internalType\":\"bool\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"jbOwner\",\"inputs\":[],\"outputs\":[{\"name\":\"owner\",\"type\":\"address\",\"internalType\":\"address\"},{\"name\":\"projectId\",\"type\":\"uint88\",\"internalType\":\"uint88\"},{\"name\":\"permissionId\",\"type\":\"uint8\",\"internalType\":\"uint8\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"owner\",\"inputs\":[],\"outputs\":[{\"name\":\"\",\"type\":\"address\",\"internalType\":\"address\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"renounceOwnership\",\"inputs\":[],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"setPermissionId\",\"inputs\":[{\"name\":\"permissionId\",\"type\":\"uint8\",\"internalType\":\"uint8\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"suckerDeployerIsAllowed\",\"inputs\":[{\"name\":\"deployer\",\"type\":\"address\",\"internalType\":\"address\"}],\"outputs\":[{\"name\":\"\",\"type\":\"bool\",\"internalType\":\"bool\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"suckersOf\",\"inputs\":[{\"name\":\"projectId\",\"type\":\"uint256\",\"internalType\":\"uint256\"}],\"outputs\":[{\"name\":\"\",\"type\":\"address[]\",\"internalType\":\"address[]\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"transferOwnership\",\"inputs\":[{\"name\":\"newOwner\",\"type\":\"address\",\"internalType\":\"address\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"transferOwnershipToProject\",\"inputs\":[{\"name\":\"projectId\",\"type\":\"uint256\",\"internalType\":\"uint256\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"event\",\"name\":\"OwnershipTransferred\",\"inputs\":[{\"name\":\"previousOwner\",\"type\":\"address\",\"indexed\":true,\"internalType\":\"address\"},{\"name\":\"newOwner\",\"type\":\"address\",\"indexed\":true,\"internalType\":\"address\"}],\"anonymous\":false},{\"type\":\"event\",\"name\":\"PermissionIdChanged\",\"inputs\":[{\"name\":\"newIndex\",\"type\":\"uint8\",\"indexed\":false,\"internalType\":\"uint8\"}],\"anonymous\":false},{\"type\":\"event\",\"name\":\"SuckerDeployerAllowed\",\"inputs\":[{\"name\":\"deployer\",\"type\":\"address\",\"indexed\":false,\"internalType\":\"address\"}],\"anonymous\":false},{\"type\":\"event\",\"name\":\"SuckersDeployedFor\",\"inputs\":[{\"name\":\"projectId\",\"type\":\"uint256\",\"indexed\":false,\"internalType\":\"uint256\"},{\"name\":\"suckers\",\"type\":\"address[]\",\"indexed\":false,\"internalType\":\"address[]\"}],\"anonymous\":false},{\"type\":\"error\",\"name\":\"EnumerableMapNonexistentKey\",\"inputs\":[{\"name\":\"key\",\"type\":\"bytes32\",\"internalType\":\"bytes32\"}]},{\"type\":\"error\",\"name\":\"INVALID_DEPLOYER\",\"inputs\":[{\"name\":\"deployer\",\"type\":\"address\",\"internalType\":\"address\"}]},{\"type\":\"error\",\"name\":\"INVALID_NEW_OWNER\",\"inputs\":[]},{\"type\":\"error\",\"name\":\"UNAUTHORIZED\",\"inputs\":[]}]",
 }
 
 // BPSuckerRegistryABI is the input ABI used to generate the binding from.
@@ -992,6 +992,141 @@ func (_BPSuckerRegistry *BPSuckerRegistryFilterer) WatchSuckerDeployerAllowed(op
 func (_BPSuckerRegistry *BPSuckerRegistryFilterer) ParseSuckerDeployerAllowed(log types.Log) (*BPSuckerRegistrySuckerDeployerAllowed, error) {
 	event := new(BPSuckerRegistrySuckerDeployerAllowed)
 	if err := _BPSuckerRegistry.contract.UnpackLog(event, "SuckerDeployerAllowed", log); err != nil {
+		return nil, err
+	}
+	event.Raw = log
+	return event, nil
+}
+
+// BPSuckerRegistrySuckersDeployedForIterator is returned from FilterSuckersDeployedFor and is used to iterate over the raw logs and unpacked data for SuckersDeployedFor events raised by the BPSuckerRegistry contract.
+type BPSuckerRegistrySuckersDeployedForIterator struct {
+	Event *BPSuckerRegistrySuckersDeployedFor // Event containing the contract specifics and raw log
+
+	contract *bind.BoundContract // Generic contract to use for unpacking event data
+	event    string              // Event name to use for unpacking event data
+
+	logs chan types.Log        // Log channel receiving the found contract events
+	sub  ethereum.Subscription // Subscription for errors, completion and termination
+	done bool                  // Whether the subscription completed delivering logs
+	fail error                 // Occurred error to stop iteration
+}
+
+// Next advances the iterator to the subsequent event, returning whether there
+// are any more events found. In case of a retrieval or parsing error, false is
+// returned and Error() can be queried for the exact failure.
+func (it *BPSuckerRegistrySuckersDeployedForIterator) Next() bool {
+	// If the iterator failed, stop iterating
+	if it.fail != nil {
+		return false
+	}
+	// If the iterator completed, deliver directly whatever's available
+	if it.done {
+		select {
+		case log := <-it.logs:
+			it.Event = new(BPSuckerRegistrySuckersDeployedFor)
+			if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+				it.fail = err
+				return false
+			}
+			it.Event.Raw = log
+			return true
+
+		default:
+			return false
+		}
+	}
+	// Iterator still in progress, wait for either a data or an error event
+	select {
+	case log := <-it.logs:
+		it.Event = new(BPSuckerRegistrySuckersDeployedFor)
+		if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+			it.fail = err
+			return false
+		}
+		it.Event.Raw = log
+		return true
+
+	case err := <-it.sub.Err():
+		it.done = true
+		it.fail = err
+		return it.Next()
+	}
+}
+
+// Error returns any retrieval or parsing error occurred during filtering.
+func (it *BPSuckerRegistrySuckersDeployedForIterator) Error() error {
+	return it.fail
+}
+
+// Close terminates the iteration process, releasing any pending underlying
+// resources.
+func (it *BPSuckerRegistrySuckersDeployedForIterator) Close() error {
+	it.sub.Unsubscribe()
+	return nil
+}
+
+// BPSuckerRegistrySuckersDeployedFor represents a SuckersDeployedFor event raised by the BPSuckerRegistry contract.
+type BPSuckerRegistrySuckersDeployedFor struct {
+	ProjectId *big.Int
+	Suckers   []common.Address
+	Raw       types.Log // Blockchain specific contextual infos
+}
+
+// FilterSuckersDeployedFor is a free log retrieval operation binding the contract event 0xd982fdd7a5657847f0905ad1aff9ab6105d1ff64590493b3486837504dafe55a.
+//
+// Solidity: event SuckersDeployedFor(uint256 projectId, address[] suckers)
+func (_BPSuckerRegistry *BPSuckerRegistryFilterer) FilterSuckersDeployedFor(opts *bind.FilterOpts) (*BPSuckerRegistrySuckersDeployedForIterator, error) {
+
+	logs, sub, err := _BPSuckerRegistry.contract.FilterLogs(opts, "SuckersDeployedFor")
+	if err != nil {
+		return nil, err
+	}
+	return &BPSuckerRegistrySuckersDeployedForIterator{contract: _BPSuckerRegistry.contract, event: "SuckersDeployedFor", logs: logs, sub: sub}, nil
+}
+
+// WatchSuckersDeployedFor is a free log subscription operation binding the contract event 0xd982fdd7a5657847f0905ad1aff9ab6105d1ff64590493b3486837504dafe55a.
+//
+// Solidity: event SuckersDeployedFor(uint256 projectId, address[] suckers)
+func (_BPSuckerRegistry *BPSuckerRegistryFilterer) WatchSuckersDeployedFor(opts *bind.WatchOpts, sink chan<- *BPSuckerRegistrySuckersDeployedFor) (event.Subscription, error) {
+
+	logs, sub, err := _BPSuckerRegistry.contract.WatchLogs(opts, "SuckersDeployedFor")
+	if err != nil {
+		return nil, err
+	}
+	return event.NewSubscription(func(quit <-chan struct{}) error {
+		defer sub.Unsubscribe()
+		for {
+			select {
+			case log := <-logs:
+				// New log arrived, parse the event and forward to the user
+				event := new(BPSuckerRegistrySuckersDeployedFor)
+				if err := _BPSuckerRegistry.contract.UnpackLog(event, "SuckersDeployedFor", log); err != nil {
+					return err
+				}
+				event.Raw = log
+
+				select {
+				case sink <- event:
+				case err := <-sub.Err():
+					return err
+				case <-quit:
+					return nil
+				}
+			case err := <-sub.Err():
+				return err
+			case <-quit:
+				return nil
+			}
+		}
+	}), nil
+}
+
+// ParseSuckersDeployedFor is a log parse operation binding the contract event 0xd982fdd7a5657847f0905ad1aff9ab6105d1ff64590493b3486837504dafe55a.
+//
+// Solidity: event SuckersDeployedFor(uint256 projectId, address[] suckers)
+func (_BPSuckerRegistry *BPSuckerRegistryFilterer) ParseSuckersDeployedFor(log types.Log) (*BPSuckerRegistrySuckersDeployedFor, error) {
+	event := new(BPSuckerRegistrySuckersDeployedFor)
+	if err := _BPSuckerRegistry.contract.UnpackLog(event, "SuckersDeployedFor", log); err != nil {
 		return nil, err
 	}
 	event.Raw = log

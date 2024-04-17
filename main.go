@@ -54,9 +54,9 @@ var networkConfigs = map[string]NetworkConfig{
 }
 
 type SaveFileNetwork struct {
-	ProjectId     string `json:"projectId"`
-	SuckerAddress string `json:"suckerAddress"`
-	ProjectOwner  string `json:"projectOwner"`
+	ProjectId       string   `json:"projectId"`
+	SuckerAddresses []string `json:"suckerAddress"`
+	ProjectOwner    string   `json:"projectOwner"`
 }
 
 func main() {
@@ -85,21 +85,21 @@ func main() {
 			log.Fatalf("Error decoding save file '%s': %s\n", *savePath, err)
 		}
 		saveFile.Close()
-	} else if err != nil && !os.IsNotExist(err) {
+	} else if !os.IsNotExist(err) {
 		log.Fatalf("Error checking save file '%s': %s\n", *savePath, err)
 	}
 
 	// Write updated data to the save file on exit
 	defer func() {
 		if !*noSave {
-			saveFile, err := os.Create(*savePath)
+			saveFile, err := os.Create(*savePath) // Overwrite
 			if err != nil {
-				log.Fatalf("Error creating save file '%s': %s\n", *savePath, err)
+				log.Fatalf("Error creating save file at %s: %s\n", *savePath, err)
 			}
-      defer saveFile.Close()
+			defer saveFile.Close()
 
 			if err := json.NewEncoder(saveFile).Encode(save.Data); err != nil {
-				log.Fatalf("Error encoding save file '%s': %s\n", *savePath, err)
+				log.Fatalf("Error writing to save file at %s: %s\n", *savePath, err)
 			}
 		}
 	}()
@@ -153,12 +153,27 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-      // TODO: Use mutex
-			run, _ := save.Data[network.name]
+			save.RLock()
+			networkSave, _ := save.Data[network.name]
+			save.RUnlock()
 
-			if run.ProjectId == "" {
+			// Skip if we already have sucker addresses (meaning we already have a project)
+			if len(networkSave.SuckerAddresses) != 0 {
+				return
+			}
+
+			// Write any updated data to the save file
+			defer func() {
+				save.Lock()
+				save.Data[network.name] = networkSave
+				save.Unlock()
+			}()
+
+			// Launch a project if we don't have one
+			if networkSave.ProjectId == "" {
 				log.Printf("Launching a new project on %s\n", network.name)
 
+				// TODO: Tx logic is duplicative. Could this be refactored?
 				tx, err := network.controller.LaunchProjectFor(
 					network.transactor,
 					userAddr,
@@ -180,18 +195,69 @@ func main() {
 					log.Fatalf("Error waiting for project launch on %s: %s\n", network.name, err)
 				}
 
+				foundLaunchLog := false
 				for _, vLog := range receipt.Logs {
-					launch, err := network.controller.ParseLaunchProject(*vLog)
+					launchLog, err := network.controller.ParseLaunchProject(*vLog)
 					if err != nil {
 						continue
 					}
-          // TODO: Use mutex
-					save.Data[network.name] = SaveFileNetwork{launch.ProjectId.String(), "", userAddr.Hex()}
+					foundLaunchLog = true
+					networkSave.ProjectId = launchLog.ProjectId.String() // Add to save data
+					log.Printf("Launched project #%s on %s\n", launchLog.ProjectId, network.name)
+					break
+				}
 
-					log.Printf("Launched project #%s on %s\n", launch.ProjectId, network.name)
+				if !foundLaunchLog {
+					log.Fatalf("Could not find a LaunchProject event for transaction %s on %s", tx.Hash().Hex(), network.name)
 				}
 			}
 
+			projectId, success := new(big.Int).SetString(networkSave.ProjectId, 10)
+			if !success {
+				log.Fatalf("Error parsing project ID from save file: '%s'\n", networkSave.ProjectId)
+			}
+
+			// We know there's no sucker (we checked above)
+			log.Printf("Launching a sucker for project %s on %s\n", networkSave.ProjectId, network.name)
+			tx, err := network.registry.DeploySuckersFor(
+				network.transactor,
+				projectId,
+				[32]byte{},
+				[]reg.BPSuckerDeployerConfig{},
+			)
+			if err != nil {
+				cancel()
+				log.Fatalf("Error deploying sucker for project %s on %s: %s\n", networkSave.ProjectId, network.name, err)
+			}
+
+			log.Printf("Deploying sucker for project %s on %s in tx %s ...\n", networkSave.ProjectId, network.name, tx.Hash().Hex())
+			receipt, err := bind.WaitMined(ctx, network.client, tx)
+			if err != nil {
+				cancel()
+				log.Fatalf("Error waiting for sucker deployment for project %s on %s: %s\n", networkSave.ProjectId, network.name, err)
+			}
+
+			foundDeployLog := false
+			for _, vLog := range receipt.Logs {
+				deployLog, err := network.registry.ParseSuckersDeployedFor(*vLog)
+				if err != nil {
+					continue
+				}
+				foundDeployLog = true
+
+				// Convert sucker addresses to strings and add to save data.
+				suckerStrs := make([]string, len(deployLog.Suckers))
+				for i, sucker := range deployLog.Suckers {
+					suckerStrs[i] = sucker.String()
+				}
+				networkSave.SuckerAddresses = suckerStrs
+				log.Printf("Launched suckers for project #%s on %s: %v\n", projectId, network.name, suckerStrs)
+				break
+			}
+
+			if !foundDeployLog {
+				log.Fatalf("Could not find a SuckersDeployed event for transaction %s on %s", tx.Hash().Hex(), network.name)
+			}
 		}()
 	}
 
@@ -222,29 +288,29 @@ func setupNetwork(networkConfig string, ks *keystore.KeyStore, act accounts.Acco
 	// Set up the transactor for the network
 	auth, err := bind.NewKeyStoreTransactorWithChainID(ks, act, n.chainId)
 	if err != nil {
-		return SetupNetwork{}, fmt.Errorf("Error setting up transactor on %s: %s\n", n, err)
+		return SetupNetwork{}, fmt.Errorf("Error setting up transactor on %s: %s\n", networkConfig, err)
 	}
 
 	// Get the controller on that chain
 	controllerUrl := coreDeployUrl + networkConfig + "/JBController.json"
 	controllerAddress, err := deployedTo(controllerUrl)
 	if err != nil {
-		return SetupNetwork{}, fmt.Errorf("Error getting JBController address on %s: %s\n", n, err)
+		return SetupNetwork{}, fmt.Errorf("Error getting JBController address on %s: %s\n", networkConfig, err)
 	}
 	controller, err := con.NewJBController(controllerAddress, client)
 	if err != nil {
-		return SetupNetwork{}, fmt.Errorf("Error initializing JBController on %s: %s\n", n, err)
+		return SetupNetwork{}, fmt.Errorf("Error initializing JBController on %s: %s\n", networkConfig, err)
 	}
 
 	// Get the sucker registry on that chain
 	registryUrl := suckerDeployUrl + networkConfig + "/BPSuckerRegistry.json"
 	registryAddress, err := deployedTo(registryUrl)
 	if err != nil {
-		return SetupNetwork{}, fmt.Errorf("Error getting BPSuckerRegistry address on %s: %s\n", n, err)
+		return SetupNetwork{}, fmt.Errorf("Error getting BPSuckerRegistry address on %s: %s\n", networkConfig, err)
 	}
 	registry, err := reg.NewBPSuckerRegistry(registryAddress, client)
 	if err != nil {
-		return SetupNetwork{}, fmt.Errorf("Error initializing BPSuckerRegistry on %s: %s\n", n, err)
+		return SetupNetwork{}, fmt.Errorf("Error initializing BPSuckerRegistry on %s: %s\n", networkConfig, err)
 	}
 
 	name := networkConfig
