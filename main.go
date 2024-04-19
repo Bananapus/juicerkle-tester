@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -53,9 +54,27 @@ var networkConfigs = map[string]NetworkConfig{
 	"optimism_sepolia": {big.NewInt(11155420), optimismSepoliaRpcUrl},
 }
 
+var claims = struct {
+	sync.RWMutex
+	On map[string][]ProofRequest
+}{
+	On: map[string][]ProofRequest{
+		"sepolia":          make([]ProofRequest, 0),
+		"optimism_sepolia": make([]ProofRequest, 0),
+	},
+}
+
 type SaveFileNetwork struct {
 	ProjectId       string   `json:"projectId"`
 	SuckerAddresses []string `json:"suckerAddress"`
+}
+
+// Schema for proof requests to the juicerkle service
+type ProofRequest struct {
+	ChainId int            `json:"chainId"` // The chain ID of the sucker contract
+	Sucker  common.Address `json:"sucker"`  // The sucker contract address
+	Token   common.Address `json:"token"`   // The address of the token being claimed
+	Index   uint           `json:"index"`   // The index of the leaf to prove on the sucker contract
 }
 
 func main() {
@@ -182,7 +201,6 @@ func main() {
 			if networkSave.ProjectId == "" {
 				fmt.Printf("Launching a new project on %s\n", network.name)
 
-				// TODO: Tx logic is duplicative. Could this be refactored?
 				tx, err := network.controller.LaunchProjectFor(
 					network.transactor,
 					userAddr,
@@ -222,7 +240,7 @@ func main() {
 				projectId,
 				[32]byte{},
 				[]reg.BPSuckerDeployerConfig{{
-					Deployer: network.suckerDeployer,
+					Deployer: network.suckerDeployerAddress,
 					Mappings: []reg.BPTokenMapping{{
 						LocalToken:  nativeTokenAddr,
 						RemoteToken: nativeTokenAddr,
@@ -283,11 +301,13 @@ func main() {
 			}
 
 			// Bind and save the sucker
-			sucker, err := suck.NewBPSucker(common.HexToAddress(networkSave.SuckerAddresses[0]), network.client)
+			suckerAddress := common.HexToAddress(networkSave.SuckerAddresses[0])
+			sucker, err := suck.NewBPSucker(suckerAddress, network.client)
 			if err != nil {
 				errCh <- fmt.Errorf("Error binding sucker %s on %s: %s\n", networkSave.SuckerAddresses[0], network.name, err)
 				return
 			}
+			network.suckerAddress = suckerAddress
 			network.sucker = sucker
 
 			projectId, success := new(big.Int).SetString(networkSave.ProjectId, 10)
@@ -342,6 +362,20 @@ func main() {
 					}
 					fmt.Printf("Successfully prepared: beneficiary %s, amount %s, sucker %s, transaction %s, on %s.\n",
 						prepareLog.Beneficiary, prepareLog.ProjectTokenAmount, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
+
+					networkToClaimOn := "sepolia"
+					if network.name == "sepolia" {
+						networkToClaimOn = "optimism_sepolia"
+					}
+
+					// Chain ID and sucker set below
+					claims.Lock()
+					claims.On[networkToClaimOn] = append(claims.On[networkToClaimOn], ProofRequest{
+						Token: nativeTokenAddr,
+						Index: uint(prepareLog.Index.Uint64()),
+					})
+					claims.Unlock()
+
 					prepareErrCh <- nil
 				}()
 				_ = amount // suppress govet false positive (fixed in 1.22)
@@ -353,7 +387,7 @@ func main() {
 					return
 				}
 			}
-      close(prepareErrCh)
+			close(prepareErrCh)
 
 			tx, err = network.sucker.ToRemote(network.transactor, nativeTokenAddr)
 			if err != nil {
@@ -381,21 +415,112 @@ func main() {
 			return
 		}
 	}
-  close(errCh)
+	close(errCh)
 
-  // Part 3: On each network, claim the tokens from the remote sucker using the proof from the juicerkle service.
+	port := "8080"
+	if p := os.Getenv("PORT"); p != "" {
+		port = p
+	}
+	juicerkleUrl := "http://localhost:" + port + "/proof"
+
+	// Part 3: On each network, claim the tokens from the remote sucker using the proof from the juicerkle service.
+	errCh = make(chan error)
+	for _, network := range networks {
+		go func() {
+
+			claims.RLock()
+			proofReqs, _ := claims.On[network.name]
+			claims.RUnlock()
+
+			for _, proofReq := range proofReqs {
+				proofReq.ChainId = int(networkConfigs[network.name].chainId.Int64())
+				proofReq.Sucker = network.suckerAddress
+
+				jsonReq, err := json.Marshal(proofReq)
+				if err != nil {
+					errCh <- fmt.Errorf("Error marshalling proof request: %s\n", err)
+					return
+				}
+
+				resp, err := http.Post(juicerkleUrl, "application/json", bytes.NewBuffer(jsonReq))
+				if err != nil {
+					errCh <- fmt.Errorf("Error posting proof request to '%s': %s\n", juicerkleUrl, err)
+					return
+				}
+				if resp.StatusCode != http.StatusOK {
+					errCh <- fmt.Errorf("Juicerkle instance at '%s' responded with status: %s\n", juicerkleUrl, resp.Status)
+					return
+				}
+
+				defer resp.Body.Close()
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					errCh <- fmt.Errorf("Error reading juicerkle response body: %s\n", err)
+					return
+				}
+
+				var proof [][]byte
+				if err := json.Unmarshal(body, &proof); err != nil {
+					fmt.Printf("Juicerkle response: %s\n", body)
+					errCh <- fmt.Errorf("Error unmarshalling juicerkle response: %s\n", err)
+					return
+				}
+
+				var proofArrays [32][32]byte
+				if len(proof) != 32 {
+					errCh <- fmt.Errorf("Proof length is not 32: %d\n", len(proof))
+					return
+				}
+				for i, proofElem := range proof {
+					if len(proofElem) != 32 {
+						errCh <- fmt.Errorf("Proof element %d length is not 32. It is %d\n", i, len(proofElem))
+						return
+					}
+					copy(proofArrays[i][:], proofElem)
+				}
+
+        // TODO: Figure out how to pass around the BPLeaf information here from the prepare step.
+				network.sucker.Claim(
+					network.transactor,
+					suck.BPClaim{
+						Token: nativeTokenAddr,
+						Leaf: suck.BPLeaf{
+							Index:       new(big.Int).SetUint64(uint64(proofReq.Index)),
+							Beneficiary: userAddr,
+						},
+						Proof: proofArrays,
+					},
+				)
+
+			}
+		}()
+
+		_ = network // supress govet false positive (fixed in 1.22)
+	}
+
+	for range networks {
+		if err := <-errCh; err != nil {
+			cancel()
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+	}
+
+	close(errCh)
+
 }
 
 type SetupNetwork struct {
-	name            string
-	client          *ethclient.Client
-	transactor      *bind.TransactOpts
-	sucker          *suck.BPSucker
-	registry        *reg.BPSuckerRegistry
-	controller      *con.JBController
-	terminal        *term.JBMultiTerminal
-	terminalAddress common.Address
-	suckerDeployer  common.Address
+	name                  string
+	client                *ethclient.Client
+	transactor            *bind.TransactOpts
+	sucker                *suck.BPSucker
+	registry              *reg.BPSuckerRegistry
+	controller            *con.JBController
+	terminal              *term.JBMultiTerminal
+	terminalAddress       common.Address
+	suckerAddress         common.Address
+	suckerDeployerAddress common.Address
 }
 
 func setupNetwork(networkConfig string, ks *keystore.KeyStore, act accounts.Account) (SetupNetwork, error) {
@@ -456,7 +581,7 @@ func setupNetwork(networkConfig string, ks *keystore.KeyStore, act accounts.Acco
 	}
 
 	name := networkConfig
-	return SetupNetwork{name, client, auth, nil, registry, controller, terminal, terminalAddress, suckerDeployerAddress}, nil
+	return SetupNetwork{name, client, auth, nil, registry, controller, terminal, terminalAddress, common.Address{}, suckerDeployerAddress}, nil
 }
 
 func deployedTo(jsonUrl string) (common.Address, error) {
