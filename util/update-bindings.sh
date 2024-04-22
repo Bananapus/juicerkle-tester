@@ -23,6 +23,8 @@ echo "Updating JBController abi..."
 forge inspect JBController abi > "$CURRENT_PATH/abi/JBController.json"
 echo "Updating JBMultiTerminal abi..."
 forge inspect JBMultiTerminal abi > "$CURRENT_PATH/abi/JBMultiTerminal.json"
+echo "Updating JBPermissions abi..."
+forge inspect JBPermissions abi > "$CURRENT_PATH/abi/JBPermissions.json"
 
 echo "Generating bindings..."
 cd "$CURRENT_PATH"
@@ -30,5 +32,6 @@ abigen --abi="abi/BPSucker.json"         --pkg=BPSucker         --type BPSucker 
 abigen --abi="abi/BPSuckerRegistry.json" --pkg=BPSuckerRegistry --type BPSuckerRegistry --out="bindings/BPSuckerRegistry/bindings.go"
 abigen --abi="abi/JBController.json"     --pkg=JBController     --type JBController     --out="bindings/JBController/bindings.go"
 abigen --abi="abi/JBMultiTerminal.json"  --pkg=JBMultiTerminal  --type JBMultiTerminal  --out="bindings/JBMultiTerminal/bindings.go"
+abigen --abi="abi/JBPermissions.json"    --pkg=JBPermissions    --type JBPermissions    --out="bindings/JBPermissions/bindings.go"
 
 echo "Done!"

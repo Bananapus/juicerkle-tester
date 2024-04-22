@@ -16,6 +16,7 @@ import (
 	reg "github.com/Bananapus/juicerkle-tester/bindings/BPSuckerRegistry"
 	con "github.com/Bananapus/juicerkle-tester/bindings/JBController"
 	term "github.com/Bananapus/juicerkle-tester/bindings/JBMultiTerminal"
+	perm "github.com/Bananapus/juicerkle-tester/bindings/JBPermissions"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -250,9 +251,31 @@ func main() {
 				return
 			}
 
+			// Give the registry permission to map sucker tokens on our behalf
+			tx, err := network.permissions.SetPermissionsFor(
+				network.transactor,
+				userAddr,
+				perm.JBPermissionsData{
+					Operator:      network.registryAddress,
+					ProjectId:     projectId,
+					PermissionIds: []*big.Int{big.NewInt(28)},
+				},
+			)
+			if err != nil {
+				errCh <- rpcErrorSignature(fmt.Errorf("error giving token map permissions for project %s to %s on %s: %w",
+					networkSave.ProjectId, network.registryAddress, network.name, err), err)
+				return
+			}
+			permLog, err := waitAndParseLog(ctx, tx, network.client, network.permissions.ParseOperatorPermissionsSet)
+			if err != nil {
+				errCh <- fmt.Errorf("error awaiting SuckersDeployed event on %s: %w", network.name, err)
+				return
+			}
+			fmt.Printf("Gave registry %s permission to map tokens on %s in transaction %s\n", permLog.Operator, network.name, tx.Hash())
+
 			// We know there's no sucker (we checked above), so deploy one.
 			fmt.Printf("Launching a sucker for project %s on %s\n", networkSave.ProjectId, network.name)
-			tx, err := network.registry.DeploySuckersFor(
+			tx, err = network.registry.DeploySuckersFor(
 				network.transactor,
 				projectId,
 				[32]byte{0x1}, // Random salt.
@@ -562,9 +585,11 @@ type SetupNetwork struct {
 	sucker                *suck.BPSucker
 	registry              *reg.BPSuckerRegistry
 	controller            *con.JBController
+	permissions           *perm.JBPermissions
 	terminal              *term.JBMultiTerminal
 	terminalAddress       common.Address
 	suckerAddress         common.Address
+	registryAddress       common.Address
 	suckerDeployerAddress common.Address
 }
 
@@ -598,6 +623,17 @@ func setupNetwork(networkConfig string, ks *keystore.KeyStore, act accounts.Acco
 		return SetupNetwork{}, fmt.Errorf("error initializing JBController on %s: %w", networkConfig, err)
 	}
 
+	// Get the permissions on that chain
+	permissionsUrl := coreDeployUrl + networkConfig + "/JBPermissions.json"
+	permissionsAddress, err := deployedTo(permissionsUrl)
+	if err != nil {
+		return SetupNetwork{}, fmt.Errorf("error getting JBPermissions address on %s: %w", networkConfig, err)
+	}
+	permissions, err := perm.NewJBPermissions(permissionsAddress, client)
+	if err != nil {
+		return SetupNetwork{}, fmt.Errorf("error initializing JBPermissions on %s: %w", networkConfig, err)
+	}
+
 	// Get the multi terminal on that chain
 	multiTerminalUrl := coreDeployUrl + networkConfig + "/JBMultiTerminal.json"
 	terminalAddress, err := deployedTo(multiTerminalUrl)
@@ -627,7 +663,7 @@ func setupNetwork(networkConfig string, ks *keystore.KeyStore, act accounts.Acco
 	}
 
 	name := networkConfig
-	return SetupNetwork{name, client, auth, nil, registry, controller, terminal, terminalAddress, common.Address{}, suckerDeployerAddress}, nil
+	return SetupNetwork{name, client, auth, nil, registry, controller, permissions, terminal, terminalAddress, common.Address{}, registryAddress, suckerDeployerAddress}, nil
 }
 
 // Get the address of a contract from its deployment JSON.
