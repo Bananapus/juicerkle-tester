@@ -229,7 +229,7 @@ func main() {
 					"Launched with juicerkle-tester.",
 				)
 				if err != nil {
-					errCh <- rpcErrorSignature(fmt.Errorf("error launching project on %s: %w", network.name, err))
+					errCh <- rpcErrorSignature(fmt.Errorf("error launching project on %s: %w", network.name, err), err)
 					return
 				}
 
@@ -255,7 +255,7 @@ func main() {
 			tx, err := network.registry.DeploySuckersFor(
 				network.transactor,
 				projectId,
-				[32]byte{}, // Empty salt.
+				[32]byte{0x1}, // Random salt.
 				[]reg.BPSuckerDeployerConfig{{
 					Deployer: network.suckerDeployerAddress,
 					Mappings: []reg.BPTokenMapping{{
@@ -267,7 +267,7 @@ func main() {
 				}},
 			)
 			if err != nil {
-				errCh <- rpcErrorSignature(fmt.Errorf("error deploying sucker for project %s on %s: %w", networkSave.ProjectId, network.name, err))
+				errCh <- rpcErrorSignature(fmt.Errorf("error deploying sucker for project %s on %s: %w", networkSave.ProjectId, network.name, err), err)
 				return
 			}
 			deployLog, err := waitAndParseLog(ctx, tx, network.client, network.registry.ParseSuckersDeployedFor)
@@ -356,7 +356,7 @@ func main() {
 				[]byte{}, // No metadata.
 			)
 			if err != nil {
-				errCh <- rpcErrorSignature(fmt.Errorf("error paying project %s on %s: %w", networkSave.ProjectId, network.name, err))
+				errCh <- rpcErrorSignature(fmt.Errorf("error paying project %s on %s: %w", networkSave.ProjectId, network.name, err), err)
 				return
 			}
 
@@ -379,7 +379,7 @@ func main() {
 						nativeTokenAddr,
 					)
 					if err != nil {
-						prepareErrCh <- rpcErrorSignature(fmt.Errorf("error preparing sucker %s on %s: %w", networkSave.SuckerAddresses[0], network.name, err))
+						prepareErrCh <- rpcErrorSignature(fmt.Errorf("error preparing sucker %s on %s: %w", networkSave.SuckerAddresses[0], network.name, err), err)
 						return
 					}
 					prepareLog, err := waitAndParseLog(ctx, tx, network.client, network.sucker.ParseInsertToOutboxTree)
@@ -423,7 +423,7 @@ func main() {
 			// Send the outbox tree to the remote sucker
 			tx, err = network.sucker.ToRemote(network.transactor, nativeTokenAddr)
 			if err != nil {
-				prepareErrCh <- rpcErrorSignature(fmt.Errorf("error sending to remote on %s: %w", network.name, err))
+				prepareErrCh <- rpcErrorSignature(fmt.Errorf("error sending to remote on %s: %w", network.name, err), err)
 				return
 			}
 			toRemoteLog, err := waitAndParseLog(ctx, tx, network.client, network.sucker.ParseRootToRemote)
@@ -526,7 +526,7 @@ func main() {
 					},
 				)
 				if err != nil {
-					errCh <- rpcErrorSignature(fmt.Errorf("error calling claim, sucker %s, network %s: %w", proofReq.Sucker, network.name, err))
+					errCh <- rpcErrorSignature(fmt.Errorf("error calling claim, sucker %s, network %s: %w", proofReq.Sucker, network.name, err), err)
 					return
 				}
 				receipt, err := bind.WaitMined(ctx, network.client, tx)
@@ -675,11 +675,11 @@ func waitAndParseLog[T any](ctx context.Context, tx *types.Transaction, c *ethcl
 }
 
 // Add the error signature to an error.
-func rpcErrorSignature(err error) error {
+func rpcErrorSignature(wrapError, err error) error {
 	if dataErr, ok := err.(rpc.DataError); ok {
 		if signature, ok := dataErr.ErrorData().(string); ok {
-			err = fmt.Errorf("%s with error %s", err, signature)
+			wrapError = fmt.Errorf("%s with error %s", wrapError, signature)
 		}
 	}
-	return err
+	return wrapError
 }
