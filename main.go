@@ -23,6 +23,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 const (
@@ -61,7 +62,7 @@ type ClaimData struct {
 }
 
 var (
-  projectWeight  = big.NewInt(1e18) // 1e18 wei of project tokens
+	projectWeight   = big.NewInt(1e18)                                                  // 1e18 wei of project tokens
 	nativeTokenAddr = common.HexToAddress("0x000000000000000000000000000000000000EEEe") // JBConstants.NATIVE_TOKEN
 	claimAmounts    = []*big.Int{big.NewInt(25), big.NewInt(75)}                        // 25 and 75 wei of project tokens, being claimed on each network
 	// Channels to send claim data from the prepare step to the claim step.
@@ -186,7 +187,7 @@ func main() {
 		go func() {
 			// Read the save file data for this network.
 			save.RLock()
-			networkSave, _ := save.Data[network.name]
+			networkSave := save.Data[network.name]
 			save.RUnlock()
 
 			// Skip if we already have sucker addresses (meaning we already have a project).
@@ -208,8 +209,19 @@ func main() {
 				tx, err := network.controller.LaunchProjectFor(
 					network.transactor,
 					userAddr,
-					"",
-					[]con.JBRulesetConfig{{Weight: projectWeight}}, // Everything else is zero-valued.
+					"Hello",
+					[]con.JBRulesetConfig{{
+						MustStartAtOrAfter: big.NewInt(0),
+						Duration:           big.NewInt(0),
+						Weight:             projectWeight,
+						DecayRate:          big.NewInt(0),
+						Metadata: con.JBRulesetMetadata{
+							ReservedRate:   big.NewInt(0),
+							RedemptionRate: big.NewInt(10_000), // JBConstants.MAX_REDEMPTION_RATE
+							BaseCurrency:   big.NewInt(0xeeee), // Last 4 bytes of the native token address
+							Metadata:       big.NewInt(0),
+						},
+					}}, // Everything else is zero-valued.
 					[]con.JBTerminalConfig{{
 						Terminal:       network.terminalAddress,
 						TokensToAccept: []common.Address{nativeTokenAddr},
@@ -217,13 +229,13 @@ func main() {
 					"Launched with juicerkle-tester.",
 				)
 				if err != nil {
-					errCh <- fmt.Errorf("Error launching project on %s: %w\n", network.name, err)
+					errCh <- rpcErrorSignature(fmt.Errorf("error launching project on %s: %w", network.name, err))
 					return
 				}
 
 				launchLog, err := waitAndParseLog(ctx, tx, network.client, network.controller.ParseLaunchProject)
 				if err != nil {
-					errCh <- fmt.Errorf("Error awaiting ProjectLaunch event on %s: %w\n", network.name, err)
+					errCh <- fmt.Errorf("error awaiting ProjectLaunch event on %s: %w", network.name, err)
 					return
 				}
 
@@ -232,9 +244,9 @@ func main() {
 			}
 
 			// Read the project ID from the save data (created above or already existed).
-			projectId, success := new(big.Int).SetString(networkSave.ProjectId, 10)
+			projectId, success := big.NewInt(0).SetString(networkSave.ProjectId, 10)
 			if !success {
-				errCh <- fmt.Errorf("Error parsing project ID from save file: '%s'\n", networkSave.ProjectId)
+				errCh <- fmt.Errorf("error parsing project ID from save file: '%s'", networkSave.ProjectId)
 				return
 			}
 
@@ -247,24 +259,26 @@ func main() {
 				[]reg.BPSuckerDeployerConfig{{
 					Deployer: network.suckerDeployerAddress,
 					Mappings: []reg.BPTokenMapping{{
-						LocalToken:  nativeTokenAddr,
-						RemoteToken: nativeTokenAddr,
+						LocalToken:      nativeTokenAddr,
+						RemoteToken:     nativeTokenAddr,
+						MinBridgeAmount: big.NewInt(0), // 25e15 wei of project tokens, or 0.025 tokens is recommended. Using 0 for testing purposes.
+						MinGas:          100_000,       // 100k gas
 					}},
 				}},
 			)
 			if err != nil {
-				errCh <- fmt.Errorf("Error deploying sucker for project %s on %s: %w\n", networkSave.ProjectId, network.name, err)
+				errCh <- rpcErrorSignature(fmt.Errorf("error deploying sucker for project %s on %s: %w", networkSave.ProjectId, network.name, err))
 				return
 			}
 			deployLog, err := waitAndParseLog(ctx, tx, network.client, network.registry.ParseSuckersDeployedFor)
 			if err != nil {
-				errCh <- fmt.Errorf("Error awaiting SuckersDeployed event on %s: %w\n", network.name, err)
+				errCh <- fmt.Errorf("error awaiting SuckersDeployed event on %s: %w", network.name, err)
 				return
 			}
 
 			// Make sure suckers were deployed.
 			if len(deployLog.Suckers) == 0 {
-				errCh <- fmt.Errorf("No suckers deployed for project #%s on %s in transaction %s\n", projectId, network.name, tx.Hash())
+				errCh <- fmt.Errorf("no suckers deployed for project #%s on %s in transaction %s", projectId, network.name, tx.Hash())
 				return
 			}
 
@@ -297,20 +311,20 @@ func main() {
 	for _, amount := range claimAmounts {
 		payTotal.Add(payTotal, amount)
 	} // payTotal is now the sum of claimAmounts
-  payTotal.Mul(payTotal, big.NewInt(1e18)) // times 1e18 to account for native token 18 decimal accounting
-  payTotal.Div(payTotal, projectWeight) // divided by the project's weight
+	payTotal.Mul(payTotal, big.NewInt(1e18)) // times 1e18 to account for native token 18 decimal accounting
+	payTotal.Div(payTotal, projectWeight)    // divided by the project's weight
 
 	// PART 2: On each network, pay the project, prepare the sucker with the claimAmounts, and send the outbox tree to the remote sucker.
 	errCh = make(chan error)
 	for _, network := range networks {
 		go func() {
 			save.RLock()
-			networkSave, _ := save.Data[network.name]
+			networkSave := save.Data[network.name]
 			save.RUnlock()
 
 			// Make sure we have a sucker
 			if len(networkSave.SuckerAddresses) == 0 {
-				errCh <- fmt.Errorf("No sucker saved for project #%s on %s\n", networkSave.ProjectId, network.name)
+				errCh <- fmt.Errorf("no sucker saved for project #%s on %s", networkSave.ProjectId, network.name)
 				return
 			}
 
@@ -318,7 +332,7 @@ func main() {
 			suckerAddress := common.HexToAddress(networkSave.SuckerAddresses[0])
 			sucker, err := suck.NewBPSucker(suckerAddress, network.client)
 			if err != nil {
-				errCh <- fmt.Errorf("Error binding sucker %s on %s: %w\n", networkSave.SuckerAddresses[0], network.name, err)
+				errCh <- fmt.Errorf("error binding sucker %s on %s: %w", networkSave.SuckerAddresses[0], network.name, err)
 				return
 			}
 			network.suckerAddress = suckerAddress
@@ -326,7 +340,7 @@ func main() {
 
 			projectId, success := new(big.Int).SetString(networkSave.ProjectId, 10)
 			if !success {
-				errCh <- fmt.Errorf("Error parsing project ID from save file: '%s'\n", networkSave.ProjectId)
+				errCh <- fmt.Errorf("error parsing project ID from save file: '%s'", networkSave.ProjectId)
 				return
 			}
 
@@ -342,18 +356,18 @@ func main() {
 				[]byte{}, // No metadata.
 			)
 			if err != nil {
-				errCh <- fmt.Errorf("Error paying project %s on %s: %w\n", networkSave.ProjectId, network.name, err)
+				errCh <- rpcErrorSignature(fmt.Errorf("error paying project %s on %s: %w", networkSave.ProjectId, network.name, err))
 				return
 			}
 
 			payLog, err := waitAndParseLog(ctx, tx, network.client, network.terminal.ParsePay)
 			if err != nil {
-				errCh <- fmt.Errorf("Error awaiting Pay event on %s: %w\n", network.name, err)
+				errCh <- fmt.Errorf("error awaiting Pay event on %s: %w", network.name, err)
 				return
 			}
 			fmt.Printf("Successfully paid project %s in transaction %s on %s.\n", payLog.ProjectId, tx.Hash(), network.name)
 
-      // Prepare the sucker with the claimAmounts
+			// Prepare the sucker with the claimAmounts
 			prepareErrCh := make(chan error)
 			for _, amount := range claimAmounts {
 				go func() {
@@ -365,24 +379,24 @@ func main() {
 						nativeTokenAddr,
 					)
 					if err != nil {
-						prepareErrCh <- fmt.Errorf("Error preparing sucker %s on %s: %w\n", networkSave.SuckerAddresses[0], network.name, err)
+						prepareErrCh <- rpcErrorSignature(fmt.Errorf("error preparing sucker %s on %s: %w", networkSave.SuckerAddresses[0], network.name, err))
 						return
 					}
 					prepareLog, err := waitAndParseLog(ctx, tx, network.client, network.sucker.ParseInsertToOutboxTree)
 					if err != nil {
-						prepareErrCh <- fmt.Errorf("Error awaiting InsertToOutboxTree event on %s: %w\n", network.name, err)
+						prepareErrCh <- fmt.Errorf("error awaiting InsertToOutboxTree event on %s: %w", network.name, err)
 						return
 					}
 					fmt.Printf("Successfully prepared: beneficiary %s, amount %s, sucker %s, transaction %s, on %s.\n",
 						prepareLog.Beneficiary, prepareLog.ProjectTokenAmount, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
 
-          // TODO: We'll need a better solution if we want to test other/many networks.
-          var networkToClaimOn string
+					// TODO: We'll need a better solution if we want to test other/many networks.
+					var networkToClaimOn string
 					if network.name == "sepolia" {
 						networkToClaimOn = "optimism_sepolia"
 					} else {
-            networkToClaimOn = "sepolia"
-          }
+						networkToClaimOn = "sepolia"
+					}
 					claims[networkToClaimOn] <- ClaimData{
 						prepareLog.Index,
 						prepareLog.TerminalToken,
@@ -397,7 +411,7 @@ func main() {
 				_ = amount // suppress govet false positive (fixed in 1.22)
 			}
 
-      // Wait for all prepare transactions to finish.
+			// Wait for all prepare transactions to finish.
 			for range claimAmounts {
 				if err := <-prepareErrCh; err != nil {
 					prepareErrCh <- err
@@ -406,15 +420,15 @@ func main() {
 			}
 			close(prepareErrCh)
 
-      // Send the outbox tree to the remote sucker
+			// Send the outbox tree to the remote sucker
 			tx, err = network.sucker.ToRemote(network.transactor, nativeTokenAddr)
 			if err != nil {
-				prepareErrCh <- fmt.Errorf("Error sending to remote on %s: %w\n", network.name, err)
+				prepareErrCh <- rpcErrorSignature(fmt.Errorf("error sending to remote on %s: %w", network.name, err))
 				return
 			}
 			toRemoteLog, err := waitAndParseLog(ctx, tx, network.client, network.sucker.ParseRootToRemote)
 			if err != nil {
-				prepareErrCh <- fmt.Errorf("Error awaiting ToRemote event on %s: %w\n", network.name, err)
+				prepareErrCh <- fmt.Errorf("error awaiting ToRemote event on %s: %w", network.name, err)
 				return
 			}
 			fmt.Printf("Successfully bridged native tokens: new root %s, local sucker %s, transaction %s, on %s.\n", toRemoteLog.Root, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
@@ -425,7 +439,7 @@ func main() {
 		_ = network // supress govet false positive (fixed in 1.22)
 	}
 
-  // Wait for all networks to finish paying the project, preparing the sucker, and sending the outbox tree.
+	// Wait for all networks to finish paying the project, preparing the sucker, and sending the outbox tree.
 	for range networks {
 		if err := <-errCh; err != nil {
 			cancel()
@@ -435,7 +449,7 @@ func main() {
 	}
 	close(errCh)
 
-  // Get the Juicerkle port from the environment or use the default.
+	// Get the Juicerkle port from the environment or use the default.
 	port := "8080"
 	if p := os.Getenv("PORT"); p != "" {
 		port = p
@@ -447,7 +461,7 @@ func main() {
 	for _, network := range networks {
 		go func() {
 			for claimData := range claims[network.name] {
-        // Build the proof request for the juicerkle service
+				// Build the proof request for the juicerkle service
 				proofReq := ProofRequest{
 					ChainId: int(networkConfigs[network.name].chainId.Int64()),
 					Sucker:  claimData.SuckerAddress,
@@ -456,48 +470,48 @@ func main() {
 				}
 				jsonReq, err := json.Marshal(proofReq)
 				if err != nil {
-					errCh <- fmt.Errorf("Error marshalling proof request: %w\n", err)
+					errCh <- fmt.Errorf("error marshalling proof request: %w", err)
 					return
 				}
 
-        // Get the proof from the juicerkle service
+				// Get the proof from the juicerkle service
 				resp, err := http.Post(juicerkleUrl, "application/json", bytes.NewBuffer(jsonReq))
 				if err != nil {
-					errCh <- fmt.Errorf("Error posting proof request to '%s': %w\n", juicerkleUrl, err)
+					errCh <- fmt.Errorf("error posting proof request to '%s': %w", juicerkleUrl, err)
 					return
 				}
 				if resp.StatusCode != http.StatusOK {
-					errCh <- fmt.Errorf("Juicerkle instance at '%s' responded with status: %s\n", juicerkleUrl, resp.Status)
+					errCh <- fmt.Errorf("juicerkle instance at '%s' responded with status: %s", juicerkleUrl, resp.Status)
 					return
 				}
 				defer resp.Body.Close()
 				body, err := io.ReadAll(resp.Body)
 				if err != nil {
-					errCh <- fmt.Errorf("Error reading juicerkle response body: %w\n", err)
+					errCh <- fmt.Errorf("error reading juicerkle response body: %w", err)
 					return
 				}
 
-        // Parse and format the proof
+				// Parse and format the proof
 				var proof [][]byte
 				if err := json.Unmarshal(body, &proof); err != nil {
 					fmt.Printf("Juicerkle response: %s\n", body)
-					errCh <- fmt.Errorf("Error unmarshalling juicerkle response: %w\n", err)
+					errCh <- fmt.Errorf("error unmarshalling juicerkle response: %w", err)
 					return
 				}
 				var proofArrays [32][32]byte
 				if len(proof) != 32 {
-					errCh <- fmt.Errorf("Proof length is not 32: %d\n", len(proof))
+					errCh <- fmt.Errorf("proof length is not 32: %d", len(proof))
 					return
 				}
 				for i, proofElem := range proof {
 					if len(proofElem) != 32 {
-						errCh <- fmt.Errorf("Proof element %d length is not 32. It is %d\n", i, len(proofElem))
+						errCh <- fmt.Errorf("proof element %d length is not 32. It is %d", i, len(proofElem))
 						return
 					}
 					copy(proofArrays[i][:], proofElem)
 				}
 
-        // Claim the tokens using the proof
+				// Claim the tokens using the proof
 				tx, err := network.sucker.Claim(
 					network.transactor,
 					suck.BPClaim{
@@ -512,12 +526,12 @@ func main() {
 					},
 				)
 				if err != nil {
-					errCh <- fmt.Errorf("Error calling claim, sucker %s, network %s: %w\n", proofReq.Sucker, network.name, err)
+					errCh <- rpcErrorSignature(fmt.Errorf("error calling claim, sucker %s, network %s: %w", proofReq.Sucker, network.name, err))
 					return
 				}
 				receipt, err := bind.WaitMined(ctx, network.client, tx)
 				if err != nil {
-					errCh <- fmt.Errorf("Error waiting for transaction: %w\n", err)
+					errCh <- fmt.Errorf("error waiting for transaction: %w", err)
 					return
 				}
 				fmt.Printf("Claimed %s on %s in transaction %s\n", claimData.Token, network.name, receipt.TxHash.String())
@@ -529,7 +543,7 @@ func main() {
 		_ = network // supress govet false positive (fixed in 1.22)
 	}
 
-  // Wait for claiming to finish on all networks.
+	// Wait for claiming to finish on all networks.
 	for range networks {
 		if err := <-errCh; err != nil {
 			cancel()
@@ -558,58 +572,58 @@ type SetupNetwork struct {
 func setupNetwork(networkConfig string, ks *keystore.KeyStore, act accounts.Account) (SetupNetwork, error) {
 	n, ok := networkConfigs[networkConfig]
 	if !ok {
-		return SetupNetwork{}, fmt.Errorf("Network %s not found in networks.\n", networkConfig)
+		return SetupNetwork{}, fmt.Errorf("network %s not found in networks", networkConfig)
 	}
 
 	// Set up the client for the network
 	client, err := ethclient.Dial(n.rpcUrl)
 	if err != nil {
-		return SetupNetwork{}, fmt.Errorf("Error dialing %s: %w\n", n.rpcUrl, err)
+		return SetupNetwork{}, fmt.Errorf("error dialing %s: %w", n.rpcUrl, err)
 	}
 
 	// Set up the transactor for the network
 	auth, err := bind.NewKeyStoreTransactorWithChainID(ks, act, n.chainId)
 	if err != nil {
-		return SetupNetwork{}, fmt.Errorf("Error setting up transactor on %s: %w\n", networkConfig, err)
+		return SetupNetwork{}, fmt.Errorf("error setting up transactor on %s: %w", networkConfig, err)
 	}
 
 	// Get the controller on that chain
 	controllerUrl := coreDeployUrl + networkConfig + "/JBController.json"
 	controllerAddress, err := deployedTo(controllerUrl)
 	if err != nil {
-		return SetupNetwork{}, fmt.Errorf("Error getting JBController address on %s: %w\n", networkConfig, err)
+		return SetupNetwork{}, fmt.Errorf("error getting JBController address on %s: %w", networkConfig, err)
 	}
 	controller, err := con.NewJBController(controllerAddress, client)
 	if err != nil {
-		return SetupNetwork{}, fmt.Errorf("Error initializing JBController on %s: %w\n", networkConfig, err)
+		return SetupNetwork{}, fmt.Errorf("error initializing JBController on %s: %w", networkConfig, err)
 	}
 
 	// Get the multi terminal on that chain
 	multiTerminalUrl := coreDeployUrl + networkConfig + "/JBMultiTerminal.json"
 	terminalAddress, err := deployedTo(multiTerminalUrl)
 	if err != nil {
-		return SetupNetwork{}, fmt.Errorf("Error getting JBMultiTerminal address on %s: %w\n", networkConfig, err)
+		return SetupNetwork{}, fmt.Errorf("error getting JBMultiTerminal address on %s: %w", networkConfig, err)
 	}
 	terminal, err := term.NewJBMultiTerminal(terminalAddress, client)
 	if err != nil {
-		return SetupNetwork{}, fmt.Errorf("Error initializing JBMultiTerminal on %s: %w\n", networkConfig, err)
+		return SetupNetwork{}, fmt.Errorf("error initializing JBMultiTerminal on %s: %w", networkConfig, err)
 	}
 
-	suckerDeployerUrl := coreDeployUrl + networkConfig + "/BPOptimismSuckerDeployer.json"
+	suckerDeployerUrl := suckerDeployUrl + networkConfig + "/BPOptimismSuckerDeployer.json"
 	suckerDeployerAddress, err := deployedTo(suckerDeployerUrl)
 	if err != nil {
-		return SetupNetwork{}, fmt.Errorf("Error getting BPOptimismSuckerDeployer address on %s: %w\n", networkConfig, err)
+		return SetupNetwork{}, fmt.Errorf("error getting BPOptimismSuckerDeployer address on %s: %w", networkConfig, err)
 	}
 
 	// Get the sucker registry on that chain
 	registryUrl := suckerDeployUrl + networkConfig + "/BPSuckerRegistry.json"
 	registryAddress, err := deployedTo(registryUrl)
 	if err != nil {
-		return SetupNetwork{}, fmt.Errorf("Error getting BPSuckerRegistry address on %s: %w\n", networkConfig, err)
+		return SetupNetwork{}, fmt.Errorf("error getting BPSuckerRegistry address on %s: %w", networkConfig, err)
 	}
 	registry, err := reg.NewBPSuckerRegistry(registryAddress, client)
 	if err != nil {
-		return SetupNetwork{}, fmt.Errorf("Error initializing BPSuckerRegistry on %s: %w\n", networkConfig, err)
+		return SetupNetwork{}, fmt.Errorf("error initializing BPSuckerRegistry on %s: %w", networkConfig, err)
 	}
 
 	name := networkConfig
@@ -620,7 +634,7 @@ func setupNetwork(networkConfig string, ks *keystore.KeyStore, act accounts.Acco
 func deployedTo(jsonUrl string) (common.Address, error) {
 	resp, err := http.Get(jsonUrl)
 	if err != nil {
-		return common.Address{}, fmt.Errorf("Error fetching %s: %w\n", jsonUrl, err)
+		return common.Address{}, fmt.Errorf("error fetching %s: %w", jsonUrl, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
@@ -632,10 +646,10 @@ func deployedTo(jsonUrl string) (common.Address, error) {
 		Address string `json:"address"`
 	}
 	if err = json.Unmarshal(body, &deployedTo); err != nil {
-		return common.Address{}, fmt.Errorf("Error unmarshalling %s: %w\n", jsonUrl, err)
+		return common.Address{}, fmt.Errorf("error unmarshalling %s: %w", jsonUrl, err)
 	}
 	if deployedTo.Address == "" {
-		return common.Address{}, fmt.Errorf("Could not find deployment address from: %s\n", jsonUrl)
+		return common.Address{}, fmt.Errorf("could not find deployment address from: %s", jsonUrl)
 	}
 
 	return common.HexToAddress(deployedTo.Address), nil
@@ -647,7 +661,7 @@ type LogParser[T any] func(log types.Log) (T, error)
 func waitAndParseLog[T any](ctx context.Context, tx *types.Transaction, c *ethclient.Client, parser LogParser[T]) (T, error) {
 	receipt, err := bind.WaitMined(ctx, c, tx)
 	if err != nil {
-		return *new(T), fmt.Errorf("Error waiting for transaction: %w\n", err)
+		return *new(T), fmt.Errorf("error waiting for transaction: %w", err)
 	}
 
 	for _, vLog := range receipt.Logs {
@@ -657,5 +671,15 @@ func waitAndParseLog[T any](ctx context.Context, tx *types.Transaction, c *ethcl
 		}
 	}
 
-	return *new(T), fmt.Errorf("Could not find a log for transaction %s\n", tx.Hash())
+	return *new(T), fmt.Errorf("could not find a log for transaction %s", tx.Hash())
+}
+
+// Add the error signature to an error.
+func rpcErrorSignature(err error) error {
+	if dataErr, ok := err.(rpc.DataError); ok {
+		if signature, ok := dataErr.ErrorData().(string); ok {
+			err = fmt.Errorf("%s with error %s", err, signature)
+		}
+	}
+	return err
 }
