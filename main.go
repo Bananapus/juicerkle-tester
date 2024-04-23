@@ -64,7 +64,6 @@ type ClaimData struct {
 	Beneficiary         common.Address
 	ProjectTokenAmount  *big.Int
 	TerminalTokenAmount *big.Int
-	SuckerAddress       common.Address
 }
 
 var (
@@ -422,7 +421,6 @@ func main() {
 				errCh <- fmt.Errorf("error binding sucker %s on %s: %w", networkSave.SuckerAddresses[0], network.name, err)
 				return
 			}
-			network.suckerAddress = suckerAddress
 			network.sucker = sucker
 
 			projectId, success := new(big.Int).SetString(networkSave.ProjectId, 10)
@@ -466,7 +464,7 @@ func main() {
 			// Approve each token for the sucker to spend when preparing later
 			tx, err = erc20.Approve(
 				network.transactor,
-				network.suckerAddress,
+				suckerAddress,
 				claimTotal,
 			)
 			if err != nil {
@@ -485,8 +483,10 @@ func main() {
 			// Prepare the sucker with the claimAmounts
 			for _, amount := range claimAmounts {
 				fmt.Printf("Preparing sucker %s with amount %s on %s...\n", networkSave.SuckerAddresses[0], amount, network.name)
+				claimTransactor := *network.transactor
+				claimTransactor.GasLimit = 500_000 // Manually set gas limit because go-ethereum underestimates this by a bit.
 				tx, err = network.sucker.Prepare(
-					network.transactor,
+					&claimTransactor,
 					amount, // wei of project tokens
 					userAddr,
 					big.NewInt(0), // No minTokensReclaimed
@@ -518,7 +518,6 @@ func main() {
 					prepareLog.Beneficiary,
 					prepareLog.ProjectTokenAmount,
 					prepareLog.TerminalTokenAmount,
-					suckerAddress,
 				}
 
 				_ = amount // suppress govet false positive (fixed in 1.22)
@@ -535,7 +534,7 @@ func main() {
 				errCh <- fmt.Errorf("error awaiting ToRemote event on %s: %w", network.name, err)
 				return
 			}
-			fmt.Printf("Successfully bridged native tokens: new root %s, local sucker %s, transaction %s, on %s.\n", toRemoteLog.Root, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
+			fmt.Printf("Successfully bridged native tokens: new root 0x%x, local sucker %s, transaction %s, on %s.\n", toRemoteLog.Root, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
 
 			errCh <- nil
 		}()
@@ -564,11 +563,16 @@ func main() {
 	errCh = make(chan error)
 	for _, network := range networks {
 		go func() {
+			// Read the save file data for this network.
+			save.RLock()
+			networkSave := save.Data[network.name]
+			save.RUnlock()
+
 			for claimData := range claims[network.name] {
 				// Build the proof request for the juicerkle service
 				proofReq := ProofRequest{
 					ChainId: int(networkConfigs[network.name].chainId.Int64()),
-					Sucker:  claimData.SuckerAddress,
+					Sucker:  common.HexToAddress(networkSave.SuckerAddresses[0]),
 					Token:   claimData.Token,
 					Index:   uint(claimData.Index.Uint64()),
 				}
