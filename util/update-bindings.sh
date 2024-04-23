@@ -22,7 +22,7 @@ git pull
 echo "Updating JBController abi..."     && forge inspect JBController    abi > "$CURRENT_PATH/abi/JBController.json"
 echo "Updating JBMultiTerminal abi..."  && forge inspect JBMultiTerminal abi > "$CURRENT_PATH/abi/JBMultiTerminal.json"
 echo "Updating JBPermissions abi..."    && forge inspect JBPermissions   abi > "$CURRENT_PATH/abi/JBPermissions.json"
-echo "Updating JBTokens abi..."         && forge inspect JBTokens        abi > "$CURRENT_PATH/abi/JBTokens.json"
+echo "Updating JBERC20 abi..."          && forge inspect JBERC20         abi > "$CURRENT_PATH/abi/JBERC20.json"
 
 echo "Generating bindings..."
 cd "$CURRENT_PATH"
@@ -32,6 +32,6 @@ abigen --abi="abi/BPSuckerRegistry.json" --pkg=BPSuckerRegistry --type BPSuckerR
 abigen --abi="abi/JBController.json"     --pkg=JBController     --type JBController     --out="bindings/JBController/bindings.go"
 abigen --abi="abi/JBMultiTerminal.json"  --pkg=JBMultiTerminal  --type JBMultiTerminal  --out="bindings/JBMultiTerminal/bindings.go"
 abigen --abi="abi/JBPermissions.json"    --pkg=JBPermissions    --type JBPermissions    --out="bindings/JBPermissions/bindings.go"
-abigen --abi="abi/JBTokens.json"         --pkg=JBTokens         --type JBTokens         --out="bindings/JBTokens/bindings.go"
+abigen --abi="abi/JBERC20.json"          --pkg=JBERC20          --type JBERC20          --out="bindings/JBERC20/bindings.go"
 
 echo "Done!"

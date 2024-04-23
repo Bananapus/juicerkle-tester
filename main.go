@@ -15,10 +15,12 @@ import (
 	suck "github.com/Bananapus/juicerkle-tester/bindings/BPSucker"
 	reg "github.com/Bananapus/juicerkle-tester/bindings/BPSuckerRegistry"
 	con "github.com/Bananapus/juicerkle-tester/bindings/JBController"
+	erc "github.com/Bananapus/juicerkle-tester/bindings/JBERC20"
 	term "github.com/Bananapus/juicerkle-tester/bindings/JBMultiTerminal"
 	perm "github.com/Bananapus/juicerkle-tester/bindings/JBPermissions"
 
 	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/common"
@@ -266,13 +268,56 @@ func main() {
 					errCh <- rpcErrorSignature(fmt.Errorf("error deploying ERC20 for project %s on %s: %w", networkSave.ProjectId, network.name, err), err)
 					return
 				}
-				_, err = bind.WaitMined(ctx, network.client, tx)
+
+				// TODO: This works for now, but could be improved.
+				ownershipTransferred, err := waitAndParseLog(ctx, tx, network.client, func(log types.Log) (*erc.JBERC20OwnershipTransferred, error) {
+					event := "OwnershipTransferred"
+					out := new(erc.JBERC20OwnershipTransferred)
+					erc20Abi, err := erc.JBERC20MetaData.GetAbi()
+					if err != nil {
+						return out, fmt.Errorf("error getting abi for JBERC20: %w", err)
+					}
+					if len(log.Topics) == 0 {
+						return out, fmt.Errorf("no event signature")
+					}
+					if log.Topics[0] != erc20Abi.Events[event].ID {
+						return out, fmt.Errorf("event signature mismatch")
+					}
+					if len(log.Data) > 0 {
+						if err := erc20Abi.UnpackIntoInterface(out, event, log.Data); err != nil {
+							return out, fmt.Errorf("error unpacking event %s: %w", event, err)
+						}
+					}
+					var indexed abi.Arguments
+					for _, arg := range erc20Abi.Events[event].Inputs {
+						if arg.Indexed {
+							indexed = append(indexed, arg)
+						}
+					}
+					err = abi.ParseTopics(out, indexed, log.Topics[1:])
+					if err != nil {
+						return out, fmt.Errorf("error parsing topics for event %s: %w", event, err)
+					}
+					out.Raw = log
+					return out, nil
+				})
 				if err != nil {
-					errCh <- fmt.Errorf("error awaiting DeployERC20For on %s: %w", network.name, err)
+					errCh <- fmt.Errorf("error awaiting OwnershipTransferred event on %s: %w", network.name, err)
 					return
 				}
-				fmt.Printf("Deployed ERC20 for project %s on %s in transaction %s\n", networkSave.ProjectId, network.name, tx.Hash())
+
+				fmt.Printf("Deployed ERC20 %s for project %s on %s in transaction %s\n",
+					ownershipTransferred.Raw.Address, networkSave.ProjectId, network.name, tx.Hash())
+				networkSave.ERC20Address = ownershipTransferred.Raw.Address.String()
 			}
+
+			// Instantiate the ERC20 contract
+			erc20, err := erc.NewJBERC20(common.HexToAddress(networkSave.ERC20Address), network.client)
+			if err != nil {
+				errCh <- fmt.Errorf("error binding ERC20 %s on %s: %w", networkSave.ERC20Address, network.name, err)
+				return
+			}
+			network.erc20 = erc20
 
 			if !networkSave.PermissionGranted {
 				// Give the registry permission to map sucker tokens on our behalf
@@ -356,15 +401,14 @@ func main() {
 	close(errCh)
 
 	// Calculate the total amount to pay the project (sum of claimAmounts divided by the weight times 1e18).
-	payTotal := big.NewInt(0)
+	claimTotal := big.NewInt(0)
 	for _, amount := range claimAmounts {
-		payTotal.Add(payTotal, amount)
-	} // payTotal is now the sum of claimAmounts
-	payTotal.Mul(payTotal, big.NewInt(1e18)) // times 1e18 to account for native token 18 decimal accounting
-	payTotal.Div(payTotal, projectWeight)    // divided by the project's weight
+		claimTotal.Add(claimTotal, amount)
+	} // claimTotal is now the sum of claimAmounts
+	payTotal := big.NewInt(0).Mul(claimTotal, big.NewInt(1e18)) // times 1e18 to account for native token 18 decimal accounting
+	payTotal.Div(payTotal, projectWeight)                       // divided by the project's weight
 
 	// PART 2: On each network, pay the project, prepare the sucker with the claimAmounts, and send the outbox tree to the remote sucker.
-	// TODO: Approve the project's ERC20 for the suckers to use.
 	errCh = make(chan error)
 	for _, network := range networks {
 		go func() {
@@ -394,9 +438,28 @@ func main() {
 				return
 			}
 
+			// Approve each token for the sucker to spend when preparing later
+			tx, err := network.erc20.Approve(
+				network.transactor,
+				network.suckerAddress,
+				claimTotal,
+			)
+			if err != nil {
+				errCh <- rpcErrorSignature(fmt.Errorf("error approving %s ERC20 tokens at %s for sucker %s on %s: %w",
+					claimTotal, networkSave.ERC20Address, networkSave.SuckerAddresses[0], network.name, err), err)
+				return
+			}
+			_, err = bind.WaitMined(ctx, network.client, tx)
+			if err != nil {
+				errCh <- fmt.Errorf("error awaiting ERC20 Approve on %s: %w", network.name, err)
+				return
+			}
+			fmt.Printf("Approved %sERC20 tokens at %s for sucker %s in transaction %s on %s.\n",
+				claimTotal, networkSave.ERC20Address, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
+
 			// Pay the project
 			fmt.Printf("Paying project %s on %s\n", networkSave.ProjectId, network.name)
-			tx, err := network.terminal.Pay(
+			tx, err = network.terminal.Pay(
 				network.transactor,
 				projectId,
 				nativeTokenAddr,
@@ -615,6 +678,7 @@ type SetupNetwork struct {
 	controller            *con.JBController
 	permissions           *perm.JBPermissions
 	terminal              *term.JBMultiTerminal
+	erc20                 *erc.JBERC20
 	terminalAddress       common.Address
 	suckerAddress         common.Address
 	registryAddress       common.Address
@@ -691,7 +755,7 @@ func setupNetwork(networkConfig string, ks *keystore.KeyStore, act accounts.Acco
 	}
 
 	name := networkConfig
-	return SetupNetwork{name, client, auth, nil, registry, controller, permissions, terminal, terminalAddress, common.Address{}, registryAddress, suckerDeployerAddress}, nil
+	return SetupNetwork{name, client, auth, nil, registry, controller, permissions, terminal, nil, terminalAddress, common.Address{}, registryAddress, suckerDeployerAddress}, nil
 }
 
 // Get the address of a contract from its deployment JSON.
