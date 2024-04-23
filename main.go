@@ -30,8 +30,8 @@ import (
 const (
 	suckerDeployUrl       = "https://raw.githubusercontent.com/Bananapus/nana-suckers/master/deployments/nana-suckers/"
 	coreDeployUrl         = "https://raw.githubusercontent.com/Bananapus/nana-core/main/deployments/nana-core/"
-	sepoliaRpcUrl         = "https://rpc.ankr.com/eth_sepolia"
-	optimismSepoliaRpcUrl = "https://rpc.ankr.com/optimism_sepolia"
+	sepoliaRpcUrl         = "https://sepolia.infura.io/v3/b4325320f81f47f4b4161c9932abcc4c"
+	optimismSepoliaRpcUrl = "https://optimism-sepolia.infura.io/v3/b4325320f81f47f4b4161c9932abcc4c"
 )
 
 // The chain ID and RPC URL to use for each network.
@@ -48,8 +48,10 @@ var networkConfigs = map[string]NetworkConfig{
 
 // Schema for the save file, which stores project and sucker data across runs (to avoid redudant deployments).
 type SaveFileNetwork struct {
-	ProjectId       string   `json:"projectId"`
-	SuckerAddresses []string `json:"suckerAddress"`
+	ProjectId         string   `json:"projectId"`
+	ERC20Address      string   `json:"erc20Address"`
+	PermissionGranted bool     `json:"permissionGranted"`
+	SuckerAddresses   []string `json:"suckerAddress"`
 }
 
 // Data gathered from the prepare step to be used in the claim step.
@@ -251,31 +253,55 @@ func main() {
 				return
 			}
 
-			// Give the registry permission to map sucker tokens on our behalf
-			tx, err := network.permissions.SetPermissionsFor(
-				network.transactor,
-				userAddr,
-				perm.JBPermissionsData{
-					Operator:      network.registryAddress,
-					ProjectId:     projectId,
-					PermissionIds: []*big.Int{big.NewInt(28)},
-				},
-			)
-			if err != nil {
-				errCh <- rpcErrorSignature(fmt.Errorf("error giving token map permissions for project %s to %s on %s: %w",
-					networkSave.ProjectId, network.registryAddress, network.name, err), err)
-				return
+			if networkSave.ERC20Address == "" {
+				// TODO: Parse the event and store the erc20 address in the network save.
+				tx, err := network.controller.DeployERC20For(
+					network.transactor,
+					projectId,
+					"Juiceoken",
+					"JKN",
+					[32]byte{0x1}, // Random salt.
+				)
+				if err != nil {
+					errCh <- rpcErrorSignature(fmt.Errorf("error deploying ERC20 for project %s on %s: %w", networkSave.ProjectId, network.name, err), err)
+					return
+				}
+				_, err = bind.WaitMined(ctx, network.client, tx)
+				if err != nil {
+					errCh <- fmt.Errorf("error awaiting DeployERC20For on %s: %w", network.name, err)
+					return
+				}
+				fmt.Printf("Deployed ERC20 for project %s on %s in transaction %s\n", networkSave.ProjectId, network.name, tx.Hash())
 			}
-			permLog, err := waitAndParseLog(ctx, tx, network.client, network.permissions.ParseOperatorPermissionsSet)
-			if err != nil {
-				errCh <- fmt.Errorf("error awaiting SuckersDeployed event on %s: %w", network.name, err)
-				return
+
+			if !networkSave.PermissionGranted {
+				// Give the registry permission to map sucker tokens on our behalf
+				tx, err := network.permissions.SetPermissionsFor(
+					network.transactor,
+					userAddr,
+					perm.JBPermissionsData{
+						Operator:      network.registryAddress,
+						ProjectId:     projectId,
+						PermissionIds: []*big.Int{big.NewInt(28)},
+					},
+				)
+				if err != nil {
+					errCh <- rpcErrorSignature(fmt.Errorf("error giving token map permissions for project %s to %s on %s: %w",
+						networkSave.ProjectId, network.registryAddress, network.name, err), err)
+					return
+				}
+				_, err = bind.WaitMined(ctx, network.client, tx)
+				if err != nil {
+					errCh <- fmt.Errorf("error awaiting SetPermissionsFor event on %s: %w", network.name, err)
+					return
+				}
+				fmt.Printf("Gave registry %s permission to map tokens on %s in transaction %s\n", network.registryAddress, network.name, tx.Hash())
+				networkSave.PermissionGranted = true
 			}
-			fmt.Printf("Gave registry %s permission to map tokens on %s in transaction %s\n", permLog.Operator, network.name, tx.Hash())
 
 			// We know there's no sucker (we checked above), so deploy one.
 			fmt.Printf("Launching a sucker for project %s on %s\n", networkSave.ProjectId, network.name)
-			tx, err = network.registry.DeploySuckersFor(
+			tx, err := network.registry.DeploySuckersFor(
 				network.transactor,
 				projectId,
 				[32]byte{0x1}, // Random salt.
@@ -338,6 +364,7 @@ func main() {
 	payTotal.Div(payTotal, projectWeight)    // divided by the project's weight
 
 	// PART 2: On each network, pay the project, prepare the sucker with the claimAmounts, and send the outbox tree to the remote sucker.
+	// TODO: Approve the project's ERC20 for the suckers to use.
 	errCh = make(chan error)
 	for _, network := range networks {
 		go func() {
@@ -368,6 +395,7 @@ func main() {
 			}
 
 			// Pay the project
+			fmt.Printf("Paying project %s on %s\n", networkSave.ProjectId, network.name)
 			tx, err := network.terminal.Pay(
 				network.transactor,
 				projectId,
@@ -382,7 +410,6 @@ func main() {
 				errCh <- rpcErrorSignature(fmt.Errorf("error paying project %s on %s: %w", networkSave.ProjectId, network.name, err), err)
 				return
 			}
-
 			payLog, err := waitAndParseLog(ctx, tx, network.client, network.terminal.ParsePay)
 			if err != nil {
 				errCh <- fmt.Errorf("error awaiting Pay event on %s: %w", network.name, err)
@@ -394,6 +421,7 @@ func main() {
 			prepareErrCh := make(chan error)
 			for _, amount := range claimAmounts {
 				go func() {
+					fmt.Printf("Preparing sucker %s on %s...\n", networkSave.SuckerAddresses[0], network.name)
 					tx, err = network.sucker.Prepare(
 						network.transactor,
 						amount, // wei of project tokens
@@ -437,7 +465,7 @@ func main() {
 			// Wait for all prepare transactions to finish.
 			for range claimAmounts {
 				if err := <-prepareErrCh; err != nil {
-					prepareErrCh <- err
+					errCh <- err
 					return
 				}
 			}
@@ -446,17 +474,17 @@ func main() {
 			// Send the outbox tree to the remote sucker
 			tx, err = network.sucker.ToRemote(network.transactor, nativeTokenAddr)
 			if err != nil {
-				prepareErrCh <- rpcErrorSignature(fmt.Errorf("error sending to remote on %s: %w", network.name, err), err)
+				errCh <- rpcErrorSignature(fmt.Errorf("error sending to remote on %s: %w", network.name, err), err)
 				return
 			}
 			toRemoteLog, err := waitAndParseLog(ctx, tx, network.client, network.sucker.ParseRootToRemote)
 			if err != nil {
-				prepareErrCh <- fmt.Errorf("error awaiting ToRemote event on %s: %w", network.name, err)
+				errCh <- fmt.Errorf("error awaiting ToRemote event on %s: %w", network.name, err)
 				return
 			}
 			fmt.Printf("Successfully bridged native tokens: new root %s, local sucker %s, transaction %s, on %s.\n", toRemoteLog.Root, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
 
-			prepareErrCh <- nil
+			errCh <- nil
 		}()
 
 		_ = network // supress govet false positive (fixed in 1.22)
