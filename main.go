@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -184,6 +185,11 @@ func main() {
 		return
 	}
 
+	// Set up the salt for later use.
+	var salt [32]byte
+	rand.Read(salt[:])
+	fmt.Printf("Using salt: 0x%x\n", salt)
+
 	// PART 1: If needed, launch projects and suckers on each chain.
 	networks := []SetupNetwork{sepolia, optimismSepolia}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -194,11 +200,6 @@ func main() {
 			save.RLock()
 			networkSave := save.Data[network.name]
 			save.RUnlock()
-
-			// Skip if we already have sucker addresses (meaning we already have a project).
-			if len(networkSave.SuckerAddresses) != 0 {
-				return
-			}
 
 			// Update the save file data on exit.
 			defer func() {
@@ -256,13 +257,12 @@ func main() {
 			}
 
 			if networkSave.ERC20Address == "" {
-				// TODO: Parse the event and store the erc20 address in the network save.
 				tx, err := network.controller.DeployERC20For(
 					network.transactor,
 					projectId,
 					"Juiceoken",
 					"JKN",
-					[32]byte{0x1}, // Random salt.
+					salt,
 				)
 				if err != nil {
 					errCh <- rpcErrorSignature(fmt.Errorf("error deploying ERC20 for project %s on %s: %w", networkSave.ProjectId, network.name, err), err)
@@ -311,14 +311,6 @@ func main() {
 				networkSave.ERC20Address = ownershipTransferred.Raw.Address.String()
 			}
 
-			// Instantiate the ERC20 contract
-			erc20, err := erc.NewJBERC20(common.HexToAddress(networkSave.ERC20Address), network.client)
-			if err != nil {
-				errCh <- fmt.Errorf("error binding ERC20 %s on %s: %w", networkSave.ERC20Address, network.name, err)
-				return
-			}
-			network.erc20 = erc20
-
 			if !networkSave.PermissionGranted {
 				// Give the registry permission to map sucker tokens on our behalf
 				tx, err := network.permissions.SetPermissionsFor(
@@ -344,45 +336,46 @@ func main() {
 				networkSave.PermissionGranted = true
 			}
 
-			// We know there's no sucker (we checked above), so deploy one.
-			fmt.Printf("Launching a sucker for project %s on %s\n", networkSave.ProjectId, network.name)
-			tx, err := network.registry.DeploySuckersFor(
-				network.transactor,
-				projectId,
-				[32]byte{0x1}, // Random salt.
-				[]reg.BPSuckerDeployerConfig{{
-					Deployer: network.suckerDeployerAddress,
-					Mappings: []reg.BPTokenMapping{{
-						LocalToken:      nativeTokenAddr,
-						RemoteToken:     nativeTokenAddr,
-						MinBridgeAmount: big.NewInt(0), // 25e15 wei of project tokens, or 0.025 tokens is recommended. Using 0 for testing purposes.
-						MinGas:          100_000,       // 100k gas
+			if networkSave.SuckerAddresses == nil || len(networkSave.SuckerAddresses) == 0 {
+				fmt.Printf("Launching a sucker for project %s on %s\n", networkSave.ProjectId, network.name)
+				tx, err := network.registry.DeploySuckersFor(
+					network.transactor,
+					projectId,
+					salt,
+					[]reg.BPSuckerDeployerConfig{{
+						Deployer: network.suckerDeployerAddress,
+						Mappings: []reg.BPTokenMapping{{
+							LocalToken:      nativeTokenAddr,
+							RemoteToken:     nativeTokenAddr,
+							MinBridgeAmount: big.NewInt(0), // 25e15 wei of project tokens, or 0.025 tokens is recommended. Using 0 for testing purposes.
+							MinGas:          100_000,       // 100k gas
+						}},
 					}},
-				}},
-			)
-			if err != nil {
-				errCh <- rpcErrorSignature(fmt.Errorf("error deploying sucker for project %s on %s: %w", networkSave.ProjectId, network.name, err), err)
-				return
-			}
-			deployLog, err := waitAndParseLog(ctx, tx, network.client, network.registry.ParseSuckersDeployedFor)
-			if err != nil {
-				errCh <- fmt.Errorf("error awaiting SuckersDeployed event on %s: %w", network.name, err)
-				return
-			}
+				)
+				if err != nil {
+					errCh <- rpcErrorSignature(fmt.Errorf("error deploying sucker for project %s on %s: %w", networkSave.ProjectId, network.name, err), err)
+					return
+				}
+				deployLog, err := waitAndParseLog(ctx, tx, network.client, network.registry.ParseSuckersDeployedFor)
+				if err != nil {
+					errCh <- fmt.Errorf("error awaiting SuckersDeployed event on %s: %w", network.name, err)
+					return
+				}
 
-			// Make sure suckers were deployed.
-			if len(deployLog.Suckers) == 0 {
-				errCh <- fmt.Errorf("no suckers deployed for project #%s on %s in transaction %s", projectId, network.name, tx.Hash())
-				return
-			}
+				// Make sure suckers were deployed.
+				if len(deployLog.Suckers) == 0 {
+					errCh <- fmt.Errorf("no suckers deployed for project #%s on %s in transaction %s", projectId, network.name, tx.Hash())
+					return
+				}
 
-			// Convert sucker addresses to strings and add to save data.
-			suckerStrs := make([]string, len(deployLog.Suckers))
-			for i, sucker := range deployLog.Suckers {
-				suckerStrs[i] = sucker.String()
+				// Convert sucker addresses to strings and add to save data.
+				suckerStrs := make([]string, len(deployLog.Suckers))
+				for i, sucker := range deployLog.Suckers {
+					suckerStrs[i] = sucker.String()
+				}
+				networkSave.SuckerAddresses = suckerStrs
+				fmt.Printf("Launched suckers for project #%s on %s: %v\n", projectId, network.name, suckerStrs)
 			}
-			networkSave.SuckerAddresses = suckerStrs
-			fmt.Printf("Launched suckers for project #%s on %s: %v\n", projectId, network.name, suckerStrs)
 
 			errCh <- nil
 		}()
@@ -438,29 +431,12 @@ func main() {
 				return
 			}
 
-			// Approve each token for the sucker to spend when preparing later
-			tx, err := network.erc20.Approve(
-				network.transactor,
-				network.suckerAddress,
-				claimTotal,
-			)
-			if err != nil {
-				errCh <- rpcErrorSignature(fmt.Errorf("error approving %s ERC20 tokens at %s for sucker %s on %s: %w",
-					claimTotal, networkSave.ERC20Address, networkSave.SuckerAddresses[0], network.name, err), err)
-				return
-			}
-			_, err = bind.WaitMined(ctx, network.client, tx)
-			if err != nil {
-				errCh <- fmt.Errorf("error awaiting ERC20 Approve on %s: %w", network.name, err)
-				return
-			}
-			fmt.Printf("Approved %sERC20 tokens at %s for sucker %s in transaction %s on %s.\n",
-				claimTotal, networkSave.ERC20Address, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
-
 			// Pay the project
 			fmt.Printf("Paying project %s on %s\n", networkSave.ProjectId, network.name)
-			tx, err = network.terminal.Pay(
-				network.transactor,
+			payTransactor := *network.transactor
+			payTransactor.Value = payTotal
+			tx, err := network.terminal.Pay(
+				&payTransactor,
 				projectId,
 				nativeTokenAddr,
 				payTotal,
@@ -480,59 +456,73 @@ func main() {
 			}
 			fmt.Printf("Successfully paid project %s in transaction %s on %s.\n", payLog.ProjectId, tx.Hash(), network.name)
 
-			// Prepare the sucker with the claimAmounts
-			prepareErrCh := make(chan error)
-			for _, amount := range claimAmounts {
-				go func() {
-					fmt.Printf("Preparing sucker %s on %s...\n", networkSave.SuckerAddresses[0], network.name)
-					tx, err = network.sucker.Prepare(
-						network.transactor,
-						amount, // wei of project tokens
-						userAddr,
-						big.NewInt(0), // No minTokensReclaimed
-						nativeTokenAddr,
-					)
-					if err != nil {
-						prepareErrCh <- rpcErrorSignature(fmt.Errorf("error preparing sucker %s on %s: %w", networkSave.SuckerAddresses[0], network.name, err), err)
-						return
-					}
-					prepareLog, err := waitAndParseLog(ctx, tx, network.client, network.sucker.ParseInsertToOutboxTree)
-					if err != nil {
-						prepareErrCh <- fmt.Errorf("error awaiting InsertToOutboxTree event on %s: %w", network.name, err)
-						return
-					}
-					fmt.Printf("Successfully prepared: beneficiary %s, amount %s, sucker %s, transaction %s, on %s.\n",
-						prepareLog.Beneficiary, prepareLog.ProjectTokenAmount, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
-
-					// TODO: We'll need a better solution if we want to test other/many networks.
-					var networkToClaimOn string
-					if network.name == "sepolia" {
-						networkToClaimOn = "optimism_sepolia"
-					} else {
-						networkToClaimOn = "sepolia"
-					}
-					claims[networkToClaimOn] <- ClaimData{
-						prepareLog.Index,
-						prepareLog.TerminalToken,
-						prepareLog.Beneficiary,
-						prepareLog.ProjectTokenAmount,
-						prepareLog.TerminalTokenAmount,
-						suckerAddress,
-					}
-
-					prepareErrCh <- nil
-				}()
-				_ = amount // suppress govet false positive (fixed in 1.22)
+			// Instantiate the ERC20 contract
+			erc20, err := erc.NewJBERC20(common.HexToAddress(networkSave.ERC20Address), network.client)
+			if err != nil {
+				errCh <- fmt.Errorf("error binding ERC20 %s on %s: %w", networkSave.ERC20Address, network.name, err)
+				return
 			}
 
-			// Wait for all prepare transactions to finish.
-			for range claimAmounts {
-				if err := <-prepareErrCh; err != nil {
-					errCh <- err
+			// Approve each token for the sucker to spend when preparing later
+			tx, err = erc20.Approve(
+				network.transactor,
+				network.suckerAddress,
+				claimTotal,
+			)
+			if err != nil {
+				errCh <- rpcErrorSignature(fmt.Errorf("error approving %s ERC20 tokens at %s for sucker %s on %s: %w",
+					claimTotal, networkSave.ERC20Address, networkSave.SuckerAddresses[0], network.name, err), err)
+				return
+			}
+			_, err = bind.WaitMined(ctx, network.client, tx)
+			if err != nil {
+				errCh <- fmt.Errorf("error awaiting ERC20 Approve on %s: %w", network.name, err)
+				return
+			}
+			fmt.Printf("Approved %s ERC20 tokens at %s for sucker %s in transaction %s on %s.\n",
+				claimTotal, networkSave.ERC20Address, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
+
+			// Prepare the sucker with the claimAmounts
+			for _, amount := range claimAmounts {
+				fmt.Printf("Preparing sucker %s with amount %s on %s...\n", networkSave.SuckerAddresses[0], amount, network.name)
+				tx, err = network.sucker.Prepare(
+					network.transactor,
+					amount, // wei of project tokens
+					userAddr,
+					big.NewInt(0), // No minTokensReclaimed
+					nativeTokenAddr,
+				)
+				if err != nil {
+					errCh <- rpcErrorSignature(fmt.Errorf("error preparing sucker %s with amount %s on %s: %w",
+						networkSave.SuckerAddresses[0], amount, network.name, err), err)
 					return
 				}
+				prepareLog, err := waitAndParseLog(ctx, tx, network.client, network.sucker.ParseInsertToOutboxTree)
+				if err != nil {
+					errCh <- fmt.Errorf("error awaiting InsertToOutboxTree event on %s: %w", network.name, err)
+					return
+				}
+				fmt.Printf("Successfully prepared: beneficiary %s, amount %s, sucker %s, transaction %s, on %s.\n",
+					prepareLog.Beneficiary, prepareLog.ProjectTokenAmount, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
+
+				// TODO: We'll need a better solution if we want to test other/many networks.
+				var networkToClaimOn string
+				if network.name == "sepolia" {
+					networkToClaimOn = "optimism_sepolia"
+				} else {
+					networkToClaimOn = "sepolia"
+				}
+				claims[networkToClaimOn] <- ClaimData{
+					prepareLog.Index,
+					prepareLog.TerminalToken,
+					prepareLog.Beneficiary,
+					prepareLog.ProjectTokenAmount,
+					prepareLog.TerminalTokenAmount,
+					suckerAddress,
+				}
+
+				_ = amount // suppress govet false positive (fixed in 1.22)
 			}
-			close(prepareErrCh)
 
 			// Send the outbox tree to the remote sucker
 			tx, err = network.sucker.ToRemote(network.transactor, nativeTokenAddr)
@@ -604,6 +594,7 @@ func main() {
 					errCh <- fmt.Errorf("error reading juicerkle response body: %w", err)
 					return
 				}
+				fmt.Printf("Juicerkle response body: %s\n", body)
 
 				// Parse and format the proof
 				var proof [][]byte
@@ -678,7 +669,6 @@ type SetupNetwork struct {
 	controller            *con.JBController
 	permissions           *perm.JBPermissions
 	terminal              *term.JBMultiTerminal
-	erc20                 *erc.JBERC20
 	terminalAddress       common.Address
 	suckerAddress         common.Address
 	registryAddress       common.Address
@@ -755,7 +745,7 @@ func setupNetwork(networkConfig string, ks *keystore.KeyStore, act accounts.Acco
 	}
 
 	name := networkConfig
-	return SetupNetwork{name, client, auth, nil, registry, controller, permissions, terminal, nil, terminalAddress, common.Address{}, registryAddress, suckerDeployerAddress}, nil
+	return SetupNetwork{name, client, auth, nil, registry, controller, permissions, terminal, terminalAddress, common.Address{}, registryAddress, suckerDeployerAddress}, nil
 }
 
 // Get the address of a contract from its deployment JSON.
