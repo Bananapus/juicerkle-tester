@@ -50,6 +50,12 @@ var networkConfigs = map[string]NetworkConfig{
 }
 
 // Schema for the save file, which stores project and sucker data across runs (to avoid redudant deployments).
+type SaveFile struct {
+	Networks map[string]SaveFileNetwork `json:"networks"`
+	Salt     [32]byte                   `json:"salt"`
+}
+
+// Save file network schema
 type SaveFileNetwork struct {
 	ProjectId         string   `json:"projectId"`
 	ERC20Address      string   `json:"erc20Address"`
@@ -97,9 +103,12 @@ func main() {
 	// Read the save file
 	save := struct {
 		sync.RWMutex
-		Data map[string]SaveFileNetwork
+		Data SaveFile
 	}{
-		Data: make(map[string]SaveFileNetwork),
+		Data: SaveFile{
+			Networks: make(map[string]SaveFileNetwork),
+			Salt:     [32]byte{},
+		},
 	}
 
 	if _, err := os.Stat(*savePath); err == nil {
@@ -184,10 +193,11 @@ func main() {
 		return
 	}
 
-	// Set up the salt for later use.
-	var salt [32]byte
-	rand.Read(salt[:])
-	fmt.Printf("Using salt: 0x%x\n", salt)
+	// If needed, set up a random salt
+	if save.Data.Salt == [32]byte{} {
+		rand.Read(save.Data.Salt[:])
+		fmt.Printf("Generated new salt: 0x%x\n", save.Data.Salt)
+	}
 
 	// PART 1: If needed, launch projects and suckers on each chain.
 	networks := []SetupNetwork{sepolia, optimismSepolia}
@@ -197,13 +207,13 @@ func main() {
 		go func() {
 			// Read the save file data for this network.
 			save.RLock()
-			networkSave := save.Data[network.name]
+			networkSave := save.Data.Networks[network.name]
 			save.RUnlock()
 
 			// Update the save file data on exit.
 			defer func() {
 				save.Lock()
-				save.Data[network.name] = networkSave
+				save.Data.Networks[network.name] = networkSave
 				save.Unlock()
 			}()
 
@@ -256,12 +266,14 @@ func main() {
 			}
 
 			if networkSave.ERC20Address == "" {
+				randSalt := [32]byte{} // randomized each time
+				rand.Read(randSalt[:])
 				tx, err := network.controller.DeployERC20For(
 					network.transactor,
 					projectId,
 					"Juiceoken",
 					"JKN",
-					salt,
+					randSalt,
 				)
 				if err != nil {
 					errCh <- rpcErrorSignature(fmt.Errorf("error deploying ERC20 for project %s on %s: %w", networkSave.ProjectId, network.name, err), err)
@@ -340,7 +352,7 @@ func main() {
 				tx, err := network.registry.DeploySuckersFor(
 					network.transactor,
 					projectId,
-					salt,
+					save.Data.Salt,
 					[]reg.BPSuckerDeployerConfig{{
 						Deployer: network.suckerDeployerAddress,
 						Mappings: []reg.BPTokenMapping{{
@@ -405,7 +417,7 @@ func main() {
 	for _, network := range networks {
 		go func() {
 			save.RLock()
-			networkSave := save.Data[network.name]
+			networkSave := save.Data.Networks[network.name]
 			save.RUnlock()
 
 			// Make sure we have a sucker
@@ -565,7 +577,7 @@ func main() {
 		go func() {
 			// Read the save file data for this network.
 			save.RLock()
-			networkSave := save.Data[network.name]
+			networkSave := save.Data.Networks[network.name]
 			save.RUnlock()
 
 			for claimData := range claims[network.name] {
@@ -588,17 +600,18 @@ func main() {
 					errCh <- fmt.Errorf("error posting proof request to '%s': %w", juicerkleUrl, err)
 					return
 				}
-				if resp.StatusCode != http.StatusOK {
-					errCh <- fmt.Errorf("juicerkle instance at '%s' responded with status: %s", juicerkleUrl, resp.Status)
-					return
-				}
 				defer resp.Body.Close()
 				body, err := io.ReadAll(resp.Body)
 				if err != nil {
 					errCh <- fmt.Errorf("error reading juicerkle response body: %w", err)
 					return
 				}
+
 				fmt.Printf("Juicerkle response body: %s\n", body)
+				if resp.StatusCode != http.StatusOK {
+					errCh <- fmt.Errorf("juicerkle instance at '%s' responded with status %s and body %s", juicerkleUrl, resp.Status, body)
+					return
+				}
 
 				// Parse and format the proof
 				var proof [][]byte
