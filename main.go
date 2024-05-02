@@ -57,10 +57,11 @@ type SaveFile struct {
 
 // Save file network schema
 type SaveFileNetwork struct {
-	ProjectId         string   `json:"projectId"`
-	ERC20Address      string   `json:"erc20Address"`
-	PermissionGranted bool     `json:"permissionGranted"`
-	SuckerAddresses   []string `json:"suckerAddress"`
+	ProjectId                   string   `json:"projectId"`
+	ERC20Address                string   `json:"erc20Address"`
+	MapTokensPermissionGranted  bool     `json:"mapTokensPermissionGranted"`
+	MintTokensPermissionGranted bool     `json:"mintTokensPermissionGranted"`
+	SuckerAddresses             []string `json:"suckerAddress"`
 }
 
 var (
@@ -315,14 +316,15 @@ func main() {
 				networkSave.ERC20Address = ownershipTransferred.Raw.Address.String()
 			}
 
-			if !networkSave.PermissionGranted {
+			if !networkSave.MapTokensPermissionGranted {
 				// Give the registry permission to map sucker tokens on our behalf
 				tx, err := network.permissions.SetPermissionsFor(
 					network.transactor,
 					userAddr,
 					perm.JBPermissionsData{
-						Operator:      network.registryAddress,
-						ProjectId:     projectId,
+						Operator:  network.registryAddress,
+						ProjectId: projectId,
+						// JBPermissionIds.MAP_SUCKER_TOKENS = 28
 						PermissionIds: []*big.Int{big.NewInt(28)},
 					},
 				)
@@ -337,7 +339,7 @@ func main() {
 					return
 				}
 				fmt.Printf("Gave registry %s permission to map tokens on %s in transaction %s\n", network.registryAddress, network.name, tx.Hash())
-				networkSave.PermissionGranted = true
+				networkSave.MapTokensPermissionGranted = true
 			}
 
 			if networkSave.SuckerAddresses == nil || len(networkSave.SuckerAddresses) == 0 {
@@ -379,6 +381,33 @@ func main() {
 				}
 				networkSave.SuckerAddresses = suckerStrs
 				fmt.Printf("Launched suckers for project #%s on %s: %v\n", projectId, network.name, suckerStrs)
+			}
+
+			if !networkSave.MintTokensPermissionGranted {
+				// Give the registry permission to mint tokens on our behalf
+				tx, err := network.permissions.SetPermissionsFor(
+					network.transactor,
+					userAddr,
+					perm.JBPermissionsData{
+						Operator:  common.HexToAddress(networkSave.SuckerAddresses[0]),
+						ProjectId: projectId,
+						// JBPermissionIds.MINT_TOKENS = 9
+						PermissionIds: []*big.Int{big.NewInt(9)},
+					},
+				)
+				if err != nil {
+					errCh <- rpcErrorSignature(fmt.Errorf("error giving token mint permissions for project %s to %s on %s: %w",
+						networkSave.ProjectId, networkSave.SuckerAddresses[0], network.name, err), err)
+					return
+				}
+				_, err = bind.WaitMined(ctx, network.client, tx)
+				if err != nil {
+					errCh <- fmt.Errorf("error awaiting SetPermissionsFor event on %s: %w", network.name, err)
+					return
+				}
+				fmt.Printf("Gave sucker %s permission to mint tokens on %s in transaction %s\n",
+					networkSave.SuckerAddresses[0], network.name, tx.Hash())
+				networkSave.MintTokensPermissionGranted = true
 			}
 
 			errCh <- nil
