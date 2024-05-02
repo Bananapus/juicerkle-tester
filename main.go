@@ -63,32 +63,18 @@ type SaveFileNetwork struct {
 	SuckerAddresses   []string `json:"suckerAddress"`
 }
 
-// Data gathered from the prepare step to be used in the claim step.
-type ClaimData struct {
-	Index               *big.Int
-	Token               common.Address
-	Beneficiary         common.Address
-	ProjectTokenAmount  *big.Int
-	TerminalTokenAmount *big.Int
-}
-
 var (
 	projectWeight   = big.NewInt(1e18)                                                  // 1e18 wei of project tokens
 	nativeTokenAddr = common.HexToAddress("0x000000000000000000000000000000000000EEEe") // JBConstants.NATIVE_TOKEN
 	claimAmounts    = []*big.Int{big.NewInt(25), big.NewInt(75)}                        // 25 and 75 wei of project tokens, being claimed on each network
 	// Channels to send claim data from the prepare step to the claim step.
-	claims = map[string]chan (ClaimData){
-		"sepolia":          make(chan ClaimData, len(claimAmounts)),
-		"optimism_sepolia": make(chan ClaimData, len(claimAmounts)),
-	}
 )
 
-// Schema for proof requests to the juicerkle service
-type ProofRequest struct {
-	ChainId int            `json:"chainId"` // The chain ID of the sucker contract
-	Sucker  common.Address `json:"sucker"`  // The sucker contract address
-	Token   common.Address `json:"token"`   // The address of the token being claimed
-	Index   uint           `json:"index"`   // The index of the leaf to prove on the sucker contract
+type ClaimsRequest struct {
+	ChainId     *big.Int       `json:"chainId"`     // The chain ID of the sucker contract
+	Sucker      common.Address `json:"sucker"`      // The sucker contract address
+	Token       common.Address `json:"token"`       // The token address of the inbox tree being claimed from
+	Beneficiary common.Address `json:"beneficiary"` // The address of the beneficiary to get the claims for
 }
 
 func main() {
@@ -98,6 +84,7 @@ func main() {
 	keystoreIndex := flag.Int("index", 0, "The index of the account in the keystore to use.")
 	savePath := flag.String("save", "save.json", "The save.json filepath from which to read and/or store project and sucker data.")
 	noSave := flag.Bool("nosave", false, "Do not save updated project and sucker data to the save file.")
+	step := flag.String("step", "prepare", "The step to run. One of 'prepare', 'pay', or 'claim'.")
 	flag.Parse()
 
 	// Read the save file
@@ -199,12 +186,18 @@ func main() {
 		fmt.Printf("Generated new salt: 0x%x\n", save.Data.Salt)
 	}
 
-	// PART 1: If needed, launch projects and suckers on each chain.
-	networks := []SetupNetwork{sepolia, optimismSepolia}
+	// PART 1: (prepare) If needed, launch projects and suckers on each chain.
+	networks := []*SetupNetwork{&sepolia, &optimismSepolia}
 	ctx, cancel := context.WithCancel(context.Background())
+
 	errCh := make(chan error)
 	for _, network := range networks {
 		go func() {
+			if *step == "pay" || *step == "claim" {
+				errCh <- nil
+				return
+			}
+
 			// Read the save file data for this network.
 			save.RLock()
 			networkSave := save.Data.Networks[network.name]
@@ -412,7 +405,7 @@ func main() {
 	payTotal := big.NewInt(0).Mul(claimTotal, big.NewInt(1e18)) // times 1e18 to account for native token 18 decimal accounting
 	payTotal.Div(payTotal, projectWeight)                       // divided by the project's weight
 
-	// PART 2: On each network, pay the project, prepare the sucker with the claimAmounts, and send the outbox tree to the remote sucker.
+	// PART 2: (pay) On each network, pay the project, prepare the sucker with the claimAmounts, and send the outbox tree to the remote sucker.
 	errCh = make(chan error)
 	for _, network := range networks {
 		go func() {
@@ -434,6 +427,12 @@ func main() {
 				return
 			}
 			network.sucker = sucker
+
+			// If we're not doing the pay step, exit once the network's sucker has been instantiated.
+			if *step == "claim" {
+				errCh <- nil
+				return
+			}
 
 			projectId, success := new(big.Int).SetString(networkSave.ProjectId, 10)
 			if !success {
@@ -517,21 +516,6 @@ func main() {
 				fmt.Printf("Successfully prepared: beneficiary %s, amount %s, sucker %s, transaction %s, on %s.\n",
 					prepareLog.Beneficiary, prepareLog.ProjectTokenAmount, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
 
-				// TODO: We'll need a better solution if we want to test other/many networks.
-				var networkToClaimOn string
-				if network.name == "sepolia" {
-					networkToClaimOn = "optimism_sepolia"
-				} else {
-					networkToClaimOn = "sepolia"
-				}
-				claims[networkToClaimOn] <- ClaimData{
-					prepareLog.Index,
-					prepareLog.TerminalToken,
-					prepareLog.Beneficiary,
-					prepareLog.ProjectTokenAmount,
-					prepareLog.TerminalTokenAmount,
-				}
-
 				_ = amount // suppress govet false positive (fixed in 1.22)
 			}
 
@@ -569,86 +553,73 @@ func main() {
 	if p := os.Getenv("PORT"); p != "" {
 		port = p
 	}
-	juicerkleUrl := "http://localhost:" + port + "/proof"
+	juicerkleUrl := "http://localhost:" + port + "/claims"
 
 	// PART 3: On each network, claim the tokens from the remote sucker using the proof from the juicerkle service.
 	errCh = make(chan error)
 	for _, network := range networks {
 		go func() {
+			// skip sepolia for now
+			if network.name == "sepolia" {
+				errCh <- nil
+				return
+			}
+
 			// Read the save file data for this network.
 			save.RLock()
 			networkSave := save.Data.Networks[network.name]
 			save.RUnlock()
 
-			for claimData := range claims[network.name] {
-				// Build the proof request for the juicerkle service
-				proofReq := ProofRequest{
-					ChainId: int(networkConfigs[network.name].chainId.Int64()),
-					Sucker:  common.HexToAddress(networkSave.SuckerAddresses[0]),
-					Token:   claimData.Token,
-					Index:   uint(claimData.Index.Uint64()),
-				}
-				jsonReq, err := json.Marshal(proofReq)
-				if err != nil {
-					errCh <- fmt.Errorf("error marshalling proof request: %w", err)
-					return
-				}
+			// Build the claims request for the juicerkle service
+			claimsReq := ClaimsRequest{
+				ChainId:     networkConfigs[network.name].chainId,
+				Sucker:      common.HexToAddress(networkSave.SuckerAddresses[0]),
+				Token:       nativeTokenAddr,
+				Beneficiary: userAddr,
+			}
+			jsonReq, err := json.Marshal(claimsReq)
+			if err != nil {
+				errCh <- fmt.Errorf("error marshalling proof request: %w", err)
+				return
+			}
 
-				// Get the proof from the juicerkle service
-				resp, err := http.Post(juicerkleUrl, "application/json", bytes.NewBuffer(jsonReq))
-				if err != nil {
-					errCh <- fmt.Errorf("error posting proof request to '%s': %w", juicerkleUrl, err)
-					return
-				}
-				defer resp.Body.Close()
-				body, err := io.ReadAll(resp.Body)
-				if err != nil {
-					errCh <- fmt.Errorf("error reading juicerkle response body: %w", err)
-					return
-				}
+			// Get the proof from the juicerkle service
+			resp, err := http.Post(juicerkleUrl, "application/json", bytes.NewBuffer(jsonReq))
+			if err != nil {
+				errCh <- fmt.Errorf("error posting proof request to '%s': %w", juicerkleUrl, err)
+				return
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				errCh <- fmt.Errorf("error reading juicerkle response body: %w", err)
+				return
+			}
 
-				fmt.Printf("Juicerkle response body: %s\n", body)
-				if resp.StatusCode != http.StatusOK {
-					errCh <- fmt.Errorf("juicerkle instance at '%s' responded with status %s and body %s", juicerkleUrl, resp.Status, body)
-					return
-				}
+			if resp.StatusCode != http.StatusOK {
+				errCh <- fmt.Errorf("juicerkle instance at '%s' responded with status %s and body %s", juicerkleUrl, resp.Status, body)
+				return
+			}
 
-				// Parse and format the proof
-				var proof [][]byte
-				if err := json.Unmarshal(body, &proof); err != nil {
-					fmt.Printf("Juicerkle response: %s\n", body)
-					errCh <- fmt.Errorf("error unmarshalling juicerkle response: %w", err)
-					return
-				}
-				var proofArrays [32][32]byte
-				if len(proof) != 32 {
-					errCh <- fmt.Errorf("proof length is not 32: %d", len(proof))
-					return
-				}
-				for i, proofElem := range proof {
-					if len(proofElem) != 32 {
-						errCh <- fmt.Errorf("proof element %d length is not 32. It is %d", i, len(proofElem))
-						return
-					}
-					copy(proofArrays[i][:], proofElem)
-				}
+			// Parse and format the proof
+			var claims []suck.BPClaim
+			if err := json.Unmarshal(body, &claims); err != nil {
+				fmt.Printf("Juicerkle response: %s\n", body)
+				errCh <- fmt.Errorf("error unmarshalling juicerkle response: %w", err)
+				return
+			}
+
+			// Use the claims to claim the tokens
+			for _, claim := range claims {
+				fmt.Printf("Claim: %+v\n", claim)
 
 				// Claim the tokens using the proof
 				tx, err := network.sucker.Claim(
 					network.transactor,
-					suck.BPClaim{
-						Token: claimData.Token,
-						Leaf: suck.BPLeaf{
-							Index:               claimData.Index,
-							Beneficiary:         claimData.Beneficiary,
-							ProjectTokenAmount:  claimData.ProjectTokenAmount,
-							TerminalTokenAmount: claimData.TerminalTokenAmount,
-						},
-						Proof: proofArrays,
-					},
+					claim,
 				)
 				if err != nil {
-					errCh <- rpcErrorSignature(fmt.Errorf("error calling claim, sucker %s, network %s: %w", proofReq.Sucker, network.name, err), err)
+					errCh <- rpcErrorSignature(fmt.Errorf("error calling claim, sucker %s, network %s: %w", claimsReq.Sucker, network.name, err), err)
 					return
 				}
 				receipt, err := bind.WaitMined(ctx, network.client, tx)
@@ -656,10 +627,10 @@ func main() {
 					errCh <- fmt.Errorf("error waiting for transaction: %w", err)
 					return
 				}
-				fmt.Printf("Claimed %s on %s in transaction %s\n", claimData.Token, network.name, receipt.TxHash.String())
-
-				errCh <- nil
+				fmt.Printf("Claimed %s on %s in transaction %s\n", nativeTokenAddr, network.name, receipt.TxHash.String())
 			}
+
+			errCh <- nil
 		}()
 
 		_ = network // supress govet false positive (fixed in 1.22)
@@ -810,6 +781,8 @@ func waitAndParseLog[T any](ctx context.Context, tx *types.Transaction, c *ethcl
 }
 
 // Add the error signature to an error.
+// wrapError is the error wrapped with fmt.Errorf.
+// err is the error which might be an rpc.DataError.
 func rpcErrorSignature(wrapError, err error) error {
 	if dataErr, ok := err.(rpc.DataError); ok {
 		if signature, ok := dataErr.ErrorData().(string); ok {

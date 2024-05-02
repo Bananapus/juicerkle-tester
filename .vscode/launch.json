@@ -10,7 +10,7 @@
             "request": "launch",
             "mode": "debug",
             "program": "${fileDirname}",
-            "args": ["-pass", "honkle"]
+            "args": ["-pass", "honkle", "-step", "claim"]
         }
     ]
 }
