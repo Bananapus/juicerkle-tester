@@ -225,10 +225,11 @@ func main() {
 						Weight:             projectWeight,
 						DecayRate:          big.NewInt(0),
 						Metadata: con.JBRulesetMetadata{
-							ReservedRate:   big.NewInt(0),
-							RedemptionRate: big.NewInt(10_000), // JBConstants.MAX_REDEMPTION_RATE
-							BaseCurrency:   big.NewInt(0xeeee), // Last 4 bytes of the native token address
-							Metadata:       big.NewInt(0),
+							ReservedRate:      big.NewInt(0),
+							RedemptionRate:    big.NewInt(10_000), // JBConstants.MAX_REDEMPTION_RATE
+							BaseCurrency:      big.NewInt(0xeeee), // Last 4 bytes of the native token address
+							AllowOwnerMinting: true,               // Must be true for suckers to work
+							Metadata:          big.NewInt(0),
 						},
 					}}, // Everything else is zero-valued.
 					[]con.JBTerminalConfig{{
@@ -448,6 +449,9 @@ func main() {
 				return
 			}
 
+			highGasLimitTransactor := *network.transactor
+			highGasLimitTransactor.GasLimit = 500_000 // Manually set gas limit because go-ethereum underestimates some gas limits by a bit.
+
 			// Instantiate the sucker and save it and its address to the SetupNetwork struct.
 			suckerAddress := common.HexToAddress(networkSave.SuckerAddresses[0])
 			sucker, err := suck.NewBPSucker(suckerAddress, network.client)
@@ -523,10 +527,8 @@ func main() {
 			// Prepare the sucker with the claimAmounts
 			for _, amount := range claimAmounts {
 				fmt.Printf("Preparing sucker %s with amount %s on %s...\n", networkSave.SuckerAddresses[0], amount, network.name)
-				claimTransactor := *network.transactor
-				claimTransactor.GasLimit = 500_000 // Manually set gas limit because go-ethereum underestimates this by a bit.
 				tx, err = network.sucker.Prepare(
-					&claimTransactor,
+					&highGasLimitTransactor,
 					amount, // wei of project tokens
 					userAddr,
 					big.NewInt(0), // No minTokensReclaimed
@@ -549,7 +551,7 @@ func main() {
 			}
 
 			// Send the outbox tree to the remote sucker
-			tx, err = network.sucker.ToRemote(network.transactor, nativeTokenAddr)
+			tx, err = network.sucker.ToRemote(&highGasLimitTransactor, nativeTokenAddr)
 			if err != nil {
 				errCh <- rpcErrorSignature(fmt.Errorf("error sending to remote on %s: %w", network.name, err), err)
 				return
@@ -593,6 +595,10 @@ func main() {
 				errCh <- nil
 				return
 			}
+
+			highGasLimitTransactor := *network.transactor
+			// Manually set gas limit because go-ethereum can underestimate gas limits by a bit.
+			highGasLimitTransactor.GasLimit = 500_000
 
 			// Read the save file data for this network.
 			save.RLock()
@@ -644,7 +650,7 @@ func main() {
 
 				// Claim the tokens using the proof
 				tx, err := network.sucker.Claim(
-					network.transactor,
+					&highGasLimitTransactor,
 					claim,
 				)
 				if err != nil {
