@@ -37,18 +37,6 @@ const (
 	optimismSepoliaRpcUrl = "https://optimism-sepolia.infura.io/v3/b4325320f81f47f4b4161c9932abcc4c"
 )
 
-// The chain ID and RPC URL to use for each network.
-type NetworkConfig struct {
-	chainId *big.Int
-	rpcUrl  string
-}
-
-// NetworkConfig for each network.
-var networkConfigs = map[string]NetworkConfig{
-	"sepolia":          {big.NewInt(11155111), sepoliaRpcUrl},
-	"optimism_sepolia": {big.NewInt(11155420), optimismSepoliaRpcUrl},
-}
-
 // Schema for the save file, which stores project and sucker data across runs (to avoid redudant deployments).
 type SaveFile struct {
 	Networks map[string]SaveFileNetwork `json:"networks"`
@@ -64,11 +52,24 @@ type SaveFileNetwork struct {
 	SuckerAddresses             []string `json:"suckerAddress"`
 }
 
+// The chain ID and RPC URL to use for each network.
+type NetworkConfig struct {
+	chainId *big.Int
+	rpcUrl  string
+}
+
 var (
+	networkConfigs = map[string]NetworkConfig{
+		"sepolia":          {big.NewInt(11155111), sepoliaRpcUrl},
+		"optimism_sepolia": {big.NewInt(11155420), optimismSepoliaRpcUrl},
+	}
 	projectWeight   = big.NewInt(1e18)                                                  // 1e18 wei of project tokens
 	nativeTokenAddr = common.HexToAddress("0x000000000000000000000000000000000000EEEe") // JBConstants.NATIVE_TOKEN
-	claimAmounts    = []*big.Int{big.NewInt(25), big.NewInt(75)}                        // 25 and 75 wei of project tokens, being claimed on each network
-	// Channels to send claim data from the prepare step to the claim step.
+	claimAmounts    = []*big.Int{
+		big.NewInt(25),
+		big.NewInt(75),
+		big.NewInt(18),
+	} // wei of project tokens being claimed in a different prepare/claim tx on each network
 )
 
 type ClaimsRequest struct {
@@ -184,16 +185,21 @@ func main() {
 	// If needed, set up a random salt
 	if save.Data.Salt == [32]byte{} {
 		rand.Read(save.Data.Salt[:])
-		fmt.Printf("Generated new salt: 0x%x\n", save.Data.Salt)
+		fmt.Printf("Generated new sucker deploy salt: 0x%x\n", save.Data.Salt)
 	}
 
+	// Token salt should be randomized each time, but match across networks.
+	tokenSalt := [32]byte{}
+	rand.Read(tokenSalt[:])
+
 	// PART 1: (prepare) If needed, launch projects and suckers on each chain.
-	networks := []*SetupNetwork{&sepolia, &optimismSepolia}
+	networks := []SetupNetwork{sepolia, optimismSepolia}
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error)
 	for _, network := range networks {
 		go func() {
+			// If a later step was specified, skip the prepare step.
 			if *step == "pay" || *step == "claim" {
 				errCh <- nil
 				return
@@ -213,14 +219,12 @@ func main() {
 
 			// Launch a project if we don't have one.
 			if networkSave.ProjectId == "" {
-				fmt.Printf("Launching a new project on %s\n", network.name)
-
 				tx, err := network.controller.LaunchProjectFor(
 					network.transactor,
 					userAddr,
-					"Hello",
+					"", // empty project uri
 					[]con.JBRulesetConfig{{
-						MustStartAtOrAfter: big.NewInt(0),
+						MustStartAtOrAfter: big.NewInt(0), // pointers must be initialized to prevent nil panic
 						Duration:           big.NewInt(0),
 						Weight:             projectWeight,
 						DecayRate:          big.NewInt(0),
@@ -249,8 +253,8 @@ func main() {
 					return
 				}
 
-				networkSave.ProjectId = launchLog.ProjectId.String() // Add to save data
 				fmt.Printf("Launched project #%s on %s\n", launchLog.ProjectId, network.name)
+				networkSave.ProjectId = launchLog.ProjectId.String() // Add to save data
 			}
 
 			// Read the project ID from the save data (created above or already existed).
@@ -260,22 +264,22 @@ func main() {
 				return
 			}
 
+			// If we don't have an erc-20, deploy one
 			if networkSave.ERC20Address == "" {
-				randSalt := [32]byte{} // randomized each time
-				rand.Read(randSalt[:])
 				tx, err := network.controller.DeployERC20For(
 					network.transactor,
 					projectId,
 					"Juiceoken",
 					"JKN",
-					randSalt,
+					tokenSalt,
 				)
 				if err != nil {
 					errCh <- rpcErrorSignature(fmt.Errorf("error deploying ERC20 for project %s on %s: %w", networkSave.ProjectId, network.name, err), err)
 					return
 				}
 
-				// TODO: This works for now, but could be improved.
+				// parse for the OwnershipTransferred event (erc-20 contract ownership is transferred on deploy)
+				// TODO: Could make this more concise, but it works.
 				ownershipTransferred, err := waitAndParseLog(ctx, tx, network.client, func(log types.Log) (*erc.JBERC20OwnershipTransferred, error) {
 					event := "OwnershipTransferred"
 					out := new(erc.JBERC20OwnershipTransferred)
@@ -312,13 +316,13 @@ func main() {
 					return
 				}
 
-				fmt.Printf("Deployed ERC20 %s for project %s on %s in transaction %s\n",
-					ownershipTransferred.Raw.Address, networkSave.ProjectId, network.name, tx.Hash())
+				fmt.Printf("Deployed ERC20 %s with salt 0x%x for project %s on %s in transaction %s\n",
+					ownershipTransferred.Raw.Address, tokenSalt, networkSave.ProjectId, network.name, tx.Hash())
 				networkSave.ERC20Address = ownershipTransferred.Raw.Address.String()
 			}
 
+			// If we haven't given the registry permission to map tokens on our behalf, do so.
 			if !networkSave.MapTokensPermissionGranted {
-				// Give the registry permission to map sucker tokens on our behalf
 				tx, err := network.permissions.SetPermissionsFor(
 					network.transactor,
 					userAddr,
@@ -334,17 +338,19 @@ func main() {
 						networkSave.ProjectId, network.registryAddress, network.name, err), err)
 					return
 				}
+				// We don't need anything specific from the event.
 				_, err = bind.WaitMined(ctx, network.client, tx)
 				if err != nil {
 					errCh <- fmt.Errorf("error awaiting SetPermissionsFor event on %s: %w", network.name, err)
 					return
 				}
+
 				fmt.Printf("Gave registry %s permission to map tokens on %s in transaction %s\n", network.registryAddress, network.name, tx.Hash())
 				networkSave.MapTokensPermissionGranted = true
 			}
 
+			// If we haven't deployed suckers yet, do so.
 			if networkSave.SuckerAddresses == nil || len(networkSave.SuckerAddresses) == 0 {
-				fmt.Printf("Launching a sucker for project %s on %s\n", networkSave.ProjectId, network.name)
 				tx, err := network.registry.DeploySuckersFor(
 					network.transactor,
 					projectId,
@@ -384,8 +390,8 @@ func main() {
 				fmt.Printf("Launched suckers for project #%s on %s: %v\n", projectId, network.name, suckerStrs)
 			}
 
+			// If we haven't given the sucker permission to mint tokens on our behalf, do so.
 			if !networkSave.MintTokensPermissionGranted {
-				// Give the registry permission to mint tokens on our behalf
 				tx, err := network.permissions.SetPermissionsFor(
 					network.transactor,
 					userAddr,
@@ -406,6 +412,7 @@ func main() {
 					errCh <- fmt.Errorf("error awaiting SetPermissionsFor event on %s: %w", network.name, err)
 					return
 				}
+
 				fmt.Printf("Gave sucker %s permission to mint tokens on %s in transaction %s\n",
 					networkSave.SuckerAddresses[0], network.name, tx.Hash())
 				networkSave.MintTokensPermissionGranted = true
@@ -413,7 +420,6 @@ func main() {
 
 			errCh <- nil
 		}()
-
 		_ = network // supress govet false positive (fixed in 1.22)
 	}
 
@@ -427,30 +433,26 @@ func main() {
 	}
 	close(errCh)
 
-	// Calculate the total amount to pay the project (sum of claimAmounts divided by the weight times 1e18).
-	claimTotal := big.NewInt(0)
+	// Calculate the total amount of native tokens to pay the project,
+	// and the number of project tokens to approve for the sucker to spend.
+	approveTotal := big.NewInt(0)
 	for _, amount := range claimAmounts {
-		claimTotal.Add(claimTotal, amount)
+		approveTotal.Add(approveTotal, amount)
 	} // claimTotal is now the sum of claimAmounts
-	payTotal := big.NewInt(0).Mul(claimTotal, big.NewInt(1e18)) // times 1e18 to account for native token 18 decimal accounting
-	payTotal.Div(payTotal, projectWeight)                       // divided by the project's weight
+	payTotal := big.NewInt(0).Mul(approveTotal, big.NewInt(1e18)) // times 1e18 to account for native token 18 decimal accounting
+	payTotal.Div(payTotal, projectWeight)                         // divided by the project's weight
 
 	// PART 2: (pay) On each network, pay the project, prepare the sucker with the claimAmounts, and send the outbox tree to the remote sucker.
 	errCh = make(chan error)
-	for _, network := range networks {
+	for i, network := range networks {
 		go func() {
 			save.RLock()
 			networkSave := save.Data.Networks[network.name]
 			save.RUnlock()
 
-			// Make sure we have a sucker
-			if len(networkSave.SuckerAddresses) == 0 {
-				errCh <- fmt.Errorf("no sucker saved for project #%s on %s", networkSave.ProjectId, network.name)
-				return
-			}
-
+			// Manually set gas limit because go-ethereum slightly underestimates some gas limits.
 			highGasLimitTransactor := *network.transactor
-			highGasLimitTransactor.GasLimit = 500_000 // Manually set gas limit because go-ethereum underestimates some gas limits by a bit.
+			highGasLimitTransactor.GasLimit = 500_000
 
 			// Instantiate the sucker and save it and its address to the SetupNetwork struct.
 			suckerAddress := common.HexToAddress(networkSave.SuckerAddresses[0])
@@ -459,7 +461,9 @@ func main() {
 				errCh <- fmt.Errorf("error binding sucker %s on %s: %w", networkSave.SuckerAddresses[0], network.name, err)
 				return
 			}
-			network.sucker = sucker
+			networks[i].suckerAddress = suckerAddress
+			networks[i].sucker = sucker
+			network = networks[i] // update the local copy
 
 			// If we're not doing the pay step, exit once the network's sucker has been instantiated.
 			if *step == "claim" {
@@ -467,6 +471,7 @@ func main() {
 				return
 			}
 
+			// Get the project ID.
 			projectId, success := new(big.Int).SetString(networkSave.ProjectId, 10)
 			if !success {
 				errCh <- fmt.Errorf("error parsing project ID from save file: '%s'", networkSave.ProjectId)
@@ -474,9 +479,8 @@ func main() {
 			}
 
 			// Pay the project
-			fmt.Printf("Paying project %s on %s\n", networkSave.ProjectId, network.name)
 			payTransactor := *network.transactor
-			payTransactor.Value = payTotal
+			payTransactor.Value = payTotal // Attach the total as msg.value
 			tx, err := network.terminal.Pay(
 				&payTransactor,
 				projectId,
@@ -509,11 +513,11 @@ func main() {
 			tx, err = erc20.Approve(
 				network.transactor,
 				suckerAddress,
-				claimTotal,
+				approveTotal,
 			)
 			if err != nil {
 				errCh <- rpcErrorSignature(fmt.Errorf("error approving %s ERC20 tokens at %s for sucker %s on %s: %w",
-					claimTotal, networkSave.ERC20Address, networkSave.SuckerAddresses[0], network.name, err), err)
+					approveTotal, networkSave.ERC20Address, networkSave.SuckerAddresses[0], network.name, err), err)
 				return
 			}
 			_, err = bind.WaitMined(ctx, network.client, tx)
@@ -522,11 +526,10 @@ func main() {
 				return
 			}
 			fmt.Printf("Approved %s ERC20 tokens at %s for sucker %s in transaction %s on %s.\n",
-				claimTotal, networkSave.ERC20Address, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
+				approveTotal, networkSave.ERC20Address, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
 
 			// Prepare the sucker with the claimAmounts
 			for _, amount := range claimAmounts {
-				fmt.Printf("Preparing sucker %s with amount %s on %s...\n", networkSave.SuckerAddresses[0], amount, network.name)
 				tx, err = network.sucker.Prepare(
 					&highGasLimitTransactor,
 					amount, // wei of project tokens
@@ -544,7 +547,7 @@ func main() {
 					errCh <- fmt.Errorf("error awaiting InsertToOutboxTree event on %s: %w", network.name, err)
 					return
 				}
-				fmt.Printf("Successfully prepared: beneficiary %s, amount %s, sucker %s, transaction %s, on %s.\n",
+				fmt.Printf("Successfully prepared sucker: beneficiary %s, amount %s, sucker %s, transaction %s, on %s.\n",
 					prepareLog.Beneficiary, prepareLog.ProjectTokenAmount, networkSave.SuckerAddresses[0], tx.Hash(), network.name)
 
 				_ = amount // suppress govet false positive (fixed in 1.22)
@@ -565,7 +568,6 @@ func main() {
 
 			errCh <- nil
 		}()
-
 		_ = network // supress govet false positive (fixed in 1.22)
 	}
 
@@ -590,25 +592,20 @@ func main() {
 	errCh = make(chan error)
 	for _, network := range networks {
 		go func() {
-			// skip sepolia for now
+			// skip sepolia for now. TODO: Use the relayer.
 			if network.name == "sepolia" {
 				errCh <- nil
 				return
 			}
 
-			highGasLimitTransactor := *network.transactor
 			// Manually set gas limit because go-ethereum can underestimate gas limits by a bit.
+			highGasLimitTransactor := *network.transactor
 			highGasLimitTransactor.GasLimit = 500_000
-
-			// Read the save file data for this network.
-			save.RLock()
-			networkSave := save.Data.Networks[network.name]
-			save.RUnlock()
 
 			// Build the claims request for the juicerkle service
 			claimsReq := ClaimsRequest{
 				ChainId:     networkConfigs[network.name].chainId,
-				Sucker:      common.HexToAddress(networkSave.SuckerAddresses[0]),
+				Sucker:      network.suckerAddress,
 				Token:       nativeTokenAddr,
 				Beneficiary: userAddr,
 			}
@@ -646,8 +643,6 @@ func main() {
 
 			// Use the claims to claim the tokens
 			for _, claim := range claims {
-				fmt.Printf("Claim: %+v\n", claim)
-
 				// Claim the tokens using the proof
 				tx, err := network.sucker.Claim(
 					&highGasLimitTransactor,
@@ -657,17 +652,18 @@ func main() {
 					errCh <- rpcErrorSignature(fmt.Errorf("error calling claim, sucker %s, network %s: %w", claimsReq.Sucker, network.name, err), err)
 					return
 				}
-				receipt, err := bind.WaitMined(ctx, network.client, tx)
+				claimedLog, err := waitAndParseLog(ctx, tx, network.client, network.sucker.ParseClaimed)
 				if err != nil {
-					errCh <- fmt.Errorf("error waiting for transaction: %w", err)
+					errCh <- fmt.Errorf("error awaiting Claimed event on %s: %w", network.name, err)
 					return
 				}
-				fmt.Printf("Claimed %s on %s in transaction %s\n", nativeTokenAddr, network.name, receipt.TxHash.String())
+
+				fmt.Printf("Claimed %s terminal tokens (%s) and %s project tokens on %s in transaction %s\n",
+					claimedLog.TerminalTokenAmount, claimedLog.Token, claimedLog.ProjectTokenAmount, network.name, tx.Hash())
 			}
 
 			errCh <- nil
 		}()
-
 		_ = network // supress govet false positive (fixed in 1.22)
 	}
 
